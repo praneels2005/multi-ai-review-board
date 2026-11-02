@@ -93,3 +93,4 @@ def test_session_store_path_traversal_prevention():
 
     with pytest.raises(ValueError, match="Invalid session ID format"):
         SessionStore.get("session/../traversal")
+

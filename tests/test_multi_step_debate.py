@@ -73,3 +73,4 @@ async def test_multi_step_debate_cross_agent_exchange():
     # Verify provider metadata
     assert debate_item.challenger_provider == "mock"
     assert debate_item.target_provider == "mock"
+

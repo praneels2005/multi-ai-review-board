@@ -68,3 +68,4 @@ async def test_coordinator_failure_is_explicit_and_sets_partial_failure():
         assert session.combined_review is not None
         assert session.combined_review.is_fallback is True
         assert session.combined_review.status == "failed"
+

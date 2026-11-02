@@ -108,3 +108,4 @@ async def test_multi_item_benchmark_evidence_rated_sufficient():
     assert session.combined_review is not None
     ev_status = session.combined_review.evidence_sufficiency.status
     assert ev_status == "sufficient"
+
