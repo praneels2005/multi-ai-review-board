@@ -20,8 +20,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
+!frontend/src/lib/
 parts/
 sdist/
 var/
@@ -48,6 +49,8 @@ data/embeddings/*
 !data/embeddings/.gitkeep
 !data/embeddings/README.md
 data/test_embeddings/*
+data/saved_reviews/*
+!data/saved_reviews/.gitkeep
 
 # Jupyter
 .ipynb_checkpoints/
