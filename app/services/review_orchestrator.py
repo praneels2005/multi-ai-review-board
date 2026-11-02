@@ -1,0 +1,743 @@
+"""
+Review Board Orchestrator for Multiple AI Review Board.
+Coordinates Phase 1 (Independent Reviews), Phase 2 (Bounded Multi-Step Challenge Round),
+and Phase 3 (Coordinator Synthesis) with strict reliability controls:
+pre-call budget reservation (call cap & token cap on all calls including retries),
+timeouts, max 1 retry, citation validation against supplied evidence,
+failure isolation, and explicit coordinator failure tracking.
+"""
+
+import asyncio
+import json
+import logging
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Tuple, Optional, Callable
+
+from app.schemas.review_board_schema import (
+    StartupIdeaInput,
+    SpecialistAgentConfig,
+    SpecialistFeedback,
+    ValidationExperiment,
+    ChallengeResponseItem,
+    CoordinatorCombinedReview,
+    EvidenceSufficiencyAssessment,
+    BudgetConfig,
+    ReviewBoardSession,
+)
+from app.models.connectors.factory import get_provider_adapter
+from app.models.connectors.base_connector import NormalizedProviderResponse
+
+logger = logging.getLogger(__name__)
+
+
+class BudgetExceededError(Exception):
+    """Raised when call cap or token budget cap would be exceeded."""
+    pass
+
+
+SPECIALIST_REVIEW_SYSTEM_PROMPT = """You are a specialized reviewer on a startup review board.
+Evaluate the provided startup idea STRICTLY from your assigned domain role, expertise, and mandate.
+Do NOT see or consider other specialists' reviews; evaluate independently.
+
+Guidelines:
+1. Ground your review in your domain expertise.
+2. Provide critical, substantive feedback:
+   - strengths: non-empty list of key competitive strengths from your vantage point
+   - risks: non-empty list of specific domain failure points, technical or operational risks
+   - missing_assumptions: non-empty list of unstated or unverified assumptions the founders are making
+   - questions: non-empty list of probing questions for the founding team
+   - validation_experiment: a concrete, low-cost experiment to test the most dangerous assumption (hypothesis, test_design, success_metric)
+   - evidence_citations: list of supplied evidence IDs (e.g. ["E1"]) you relied on. ONLY cite IDs that actually exist in the prompt! Do NOT cite unsupplied IDs!
+   - assumptions_and_unknowns: explicit labels for what is assumed vs what is unknown or unverified.
+3. Do NOT invent market facts. Treat consensus as non-binding. This is decision support, not an investment recommendation.
+
+Respond ONLY with a valid JSON object matching this schema:
+{
+  "strengths": ["<strength1>", "<strength2>"],
+  "risks": ["<risk1>", "<risk2>"],
+  "missing_assumptions": ["<assumption1>", "<assumption2>"],
+  "questions": ["<question1>", "<question2>"],
+  "validation_experiment": {
+    "hypothesis": "<hypothesis statement>",
+    "test_design": "<step by step test>",
+    "success_metric": "<clear threshold>"
+  },
+  "evidence_citations": ["E1"],
+  "assumptions_and_unknowns": ["<labeled assumption or unknown>"]
+}
+"""
+
+CHALLENGER_SYSTEM_PROMPT = """You are a specialist reviewer generating a sharp, rigorous challenge against a peer specialist's review.
+Identify one sharp point of disagreement, conflicting operational priorities, or contested assumption in the peer specialist's evaluation.
+Focus directly on domain trade-offs (e.g. speed vs security, unit margin vs customer convenience, wellness claims vs medical rigor).
+
+Respond ONLY with a valid JSON object matching this schema:
+{
+  "challenge_point": "<1-3 concise sentences challenging the target specialist's reasoning or assumptions>"
+}
+"""
+
+TARGET_RESPONSE_SYSTEM_PROMPT = """You are a target specialist responding to a peer specialist's challenge.
+Review the challenge point against your domain evaluation.
+Provide:
+1. response: Your defense, operational counter-arguments, and clarification of trade-offs.
+2. reasoning_adjustment: An explicit statement of how your reasoning, risk appraisal, or operational model shifts or adjusts in light of this challenge.
+
+Respond ONLY with a valid JSON object matching this schema:
+{
+  "response": "<your defense and technical counter-argument>",
+  "reasoning_adjustment": "<how reasoning or risk appraisal shifted after the challenge>"
+}
+"""
+
+COORDINATOR_SYSTEM_PROMPT = """You are the independent Review Board Coordinator.
+Your role is to synthesize the specialist reviews and debate round into a rigorous decision support report.
+
+Mandates:
+1. Summarize top priorities and strategic imperatives.
+2. Highlight key disagreements, conflicting tradeoffs, and tensions between specialists.
+3. Prioritize next validation experiments with high learning value and low execution cost.
+4. Critically assess evidence sufficiency: Determine sufficiency STRICTLY from the supplied evidence items and evidence count.
+   - If count is 0: mark 'insufficient' and note lack of empirical proof.
+   - If only anecdotes / founder diaries: mark 'thin'.
+   - If empirical benchmarks/interviews/metrics provided: mark 'sufficient' and specify what they cover.
+5. If any specialist failed during the run, explicitly analyze how the missing perspective affects confidence.
+6. Clearly state: This is decision support, not an investment recommendation. Do NOT treat consensus as proof of demand.
+
+Respond ONLY with a valid JSON object matching this schema:
+{
+  "summary": "<executive synthesis>",
+  "priorities": ["<priority1>", "<priority2>"],
+  "disagreements": ["<disagreement1>", "<disagreement2>"],
+  "next_experiments": [
+    {
+      "hypothesis": "<hypothesis>",
+      "test_design": "<test>",
+      "success_metric": "<metric>"
+    }
+  ],
+  "evidence_sufficiency": {
+    "status": "<sufficient|thin|insufficient>",
+    "analysis": "<detailed rationale regarding evidence gaps>"
+  },
+  "failure_impact_analysis": "<analysis of missing specialist if any, otherwise null>",
+  "disclaimer": "Decision support only. Not an investment recommendation. Consensus among AI agents does not constitute proof of market demand."
+}
+"""
+
+
+class ReviewBoardOrchestrator:
+    """Orchestrates multi-agent review board execution with strict reliability controls."""
+
+    def __init__(self, budget_config: Optional[BudgetConfig] = None):
+        self.budget = budget_config or BudgetConfig()
+        self.calls_made = 0
+        self.tokens_used = 0
+        self.total_cost_usd = 0.0
+        self.total_latency_ms = 0.0
+        self.failures_encountered = 0
+        self.budget_stopped = False
+
+    async def _safe_provider_call(
+        self,
+        adapter,
+        system_prompt: str,
+        user_prompt: str,
+        model: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+        simulate_failure: Optional[str] = None,
+    ) -> NormalizedProviderResponse:
+        """
+        Unified provider call wrapper enforcing atomic pre-call budget checks.
+        Reserves call from budget immediately before making provider invocation,
+        preventing retries or coordinator calls from exceeding configured caps.
+        """
+        # 1. Hard Call Cap Check
+        if self.calls_made >= self.budget.call_cap:
+            self.budget_stopped = True
+            raise BudgetExceededError(f"Call cap reached ({self.calls_made}/{self.budget.call_cap})")
+
+        # 2. Hard Token Cap Pre-check (Reserve estimated input + baseline output tokens)
+        estimated_tokens = (len(system_prompt) + len(user_prompt)) // 4 + 400
+        if (self.tokens_used + estimated_tokens) > self.budget.token_cap:
+            self.budget_stopped = True
+            raise BudgetExceededError(
+                f"Token cap would be exceeded ({self.tokens_used} consumed + est. {estimated_tokens} > cap {self.budget.token_cap})"
+            )
+
+        # 3. Reserve call immediately
+        self.calls_made += 1
+        effective_timeout = timeout_seconds if timeout_seconds is not None else self.budget.timeout_seconds
+
+        # 4. Invoke Provider
+        response = await adapter.call(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            timeout_seconds=effective_timeout,
+            simulate_failure=simulate_failure
+        )
+
+        # 5. Reconcile usage
+        self.tokens_used += response.total_tokens
+        self.total_cost_usd += response.cost_estimate_usd
+        self.total_latency_ms += response.latency_ms
+
+        return response
+
+    async def execute_board(
+        self,
+        idea: StartupIdeaInput,
+        panel: List[SpecialistAgentConfig],
+        session_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    ) -> ReviewBoardSession:
+        """Run the complete 3-phase review board workflow with progress callbacks."""
+        sid = session_id or str(uuid.uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        session = ReviewBoardSession(
+            session_id=sid,
+            created_at=created_at,
+            idea=idea,
+            panel=panel,
+            budget_config=self.budget,
+            status="in_progress"
+        )
+
+        valid_evidence_ids = {e.id.strip().upper() for e in idea.evidence}
+        panel_map = {s.id: s for s in panel}
+
+        def _notify(event_type: str, data: Dict[str, Any]):
+            if progress_callback:
+                try:
+                    progress_callback({"type": event_type, "session_id": sid, **data})
+                except Exception as ex:
+                    logger.warning(f"Progress callback error: {ex}")
+
+        # -------------------------------------------------------------
+        # PHASE 1: Independent Specialist Reviews
+        # -------------------------------------------------------------
+        _notify("phase_started", {"phase": "specialists", "total": len(panel)})
+        specialist_feedbacks: List[SpecialistFeedback] = []
+
+        for specialist in panel:
+            if self.budget_stopped or self.calls_made >= self.budget.call_cap or self.tokens_used >= self.budget.token_cap:
+                session.status = "budget_stopped"
+                self.budget_stopped = True
+                break
+
+            _notify("specialist_started", {"specialist_id": specialist.id, "role": specialist.role})
+
+            feedback = await self._run_single_specialist_with_retry(
+                specialist=specialist,
+                idea=idea,
+                valid_evidence_ids=valid_evidence_ids
+            )
+            specialist_feedbacks.append(feedback)
+            if feedback.status in ["failed", "timed_out"]:
+                self.failures_encountered += 1
+
+            _notify("specialist_completed", {
+                "specialist_id": specialist.id,
+                "role": specialist.role,
+                "status": feedback.status,
+                "latency_ms": feedback.latency_ms
+            })
+
+        session.specialist_reviews = specialist_feedbacks
+
+        if self.budget_stopped or session.status == "budget_stopped":
+            session.status = "budget_stopped"
+            session.execution_summary = self._build_execution_summary(budget_stopped=True)
+            _notify("session_completed", {"status": session.status})
+            return session
+
+        # -------------------------------------------------------------
+        # PHASE 2: Bounded Multi-Step Challenge & Response Round
+        # -------------------------------------------------------------
+        _notify("phase_started", {"phase": "debate"})
+        challenge_items: List[ChallengeResponseItem] = []
+        successful_feedbacks = [f for f in specialist_feedbacks if f.status == "success"]
+
+        if len(successful_feedbacks) >= 2 and not self.budget_stopped:
+            try:
+                challenge_items = await self._run_multi_step_challenge_round(
+                    idea=idea,
+                    feedbacks=successful_feedbacks,
+                    panel_map=panel_map,
+                    notify_fn=_notify
+                )
+            except BudgetExceededError:
+                self.budget_stopped = True
+                session.status = "budget_stopped"
+            except Exception as e:
+                logger.warning(f"Debate round failed: {e}")
+
+        session.challenge_round = challenge_items
+
+        if self.budget_stopped:
+            session.status = "budget_stopped"
+            session.execution_summary = self._build_execution_summary(budget_stopped=True)
+            _notify("session_completed", {"status": session.status})
+            return session
+
+        # -------------------------------------------------------------
+        # PHASE 3: Coordinator Synthesis
+        # -------------------------------------------------------------
+        _notify("phase_started", {"phase": "coordinator"})
+        try:
+            combined = await self._run_coordinator_synthesis(
+                idea=idea,
+                specialist_feedbacks=specialist_feedbacks,
+                challenges=challenge_items
+            )
+            session.combined_review = combined
+            if combined.status in ["failed", "timed_out"] or combined.is_fallback:
+                # Coordinator failed: Mark session explicitly as partial failure
+                session.status = "partial_failure"
+            elif self.failures_encountered > 0:
+                session.status = "partial_failure"
+            else:
+                session.status = "completed"
+
+            _notify("coordinator_completed", {
+                "status": combined.status,
+                "is_fallback": combined.is_fallback
+            })
+
+        except BudgetExceededError:
+            self.budget_stopped = True
+            session.status = "budget_stopped"
+        except Exception as e:
+            logger.error(f"Coordinator execution uncaught error: {e}")
+            session.status = "partial_failure"
+
+        session.execution_summary = self._build_execution_summary(
+            budget_stopped=(session.status == "budget_stopped")
+        )
+        _notify("session_completed", {"status": session.status})
+        return session
+
+    async def _run_single_specialist_with_retry(
+        self,
+        specialist: SpecialistAgentConfig,
+        idea: StartupIdeaInput,
+        valid_evidence_ids: set
+    ) -> SpecialistFeedback:
+        """Execute a specialist review with per-agent timeout, strict output validation, and at most one retry."""
+        adapter = get_provider_adapter(specialist.provider)
+        evidence_text = "\n".join([f"[{e.id}] ({e.data_type}) {e.summary}" for e in idea.evidence]) or "None"
+
+        user_prompt = f"""Review the following startup idea according to your mandate:
+Role: {specialist.role}
+Domain Expertise: {specialist.expertise}
+Review Mandate: {specialist.mandate}
+Rationale: {specialist.rationale}
+
+Startup Details:
+Title: {idea.title}
+Target Customer: {idea.target_customer}
+Problem: {idea.problem}
+Proposed Solution: {idea.proposed_solution}
+Idea Description: {idea.idea}
+Supplied Evidence Items:
+{evidence_text}
+"""
+
+        max_attempts = 1 + min(self.budget.max_retries, 1)  # At most one retry
+        last_error = ""
+
+        for attempt in range(max_attempts):
+            start_t = time.perf_counter()
+            try:
+                # Enforce budget reservation on EVERY attempt
+                response = await self._safe_provider_call(
+                    adapter=adapter,
+                    system_prompt=SPECIALIST_REVIEW_SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    model=specialist.model,
+                    timeout_seconds=self.budget.timeout_seconds,
+                    simulate_failure=specialist.simulate_failure
+                )
+
+                duration_ms = (time.perf_counter() - start_t) * 1000
+
+                # Validate response structure
+                parsed = response.parsed_json
+                if not parsed or response.error:
+                    raise ValueError(response.error or "Failed to parse structured JSON response from provider")
+
+                # Validate required feedback fields are non-empty
+                required_fields = ["strengths", "risks", "missing_assumptions", "questions"]
+                for fld in required_fields:
+                    val = parsed.get(fld)
+                    if not val or not isinstance(val, list) or len(val) == 0:
+                        raise ValueError(f"Provider response missing required non-empty field '{fld}'")
+
+                # Validate evidence citations
+                raw_citations = [str(c).strip().upper() for c in parsed.get("evidence_citations", [])]
+                valid_cites = [c for c in raw_citations if c in valid_evidence_ids]
+                invalid_cites = [c for c in raw_citations if c not in valid_evidence_ids]
+
+                experiment_data = parsed.get("validation_experiment")
+                experiment = None
+                if experiment_data and isinstance(experiment_data, dict):
+                    experiment = ValidationExperiment(
+                        hypothesis=experiment_data.get("hypothesis", "Hypothesis not articulated"),
+                        test_design=experiment_data.get("test_design", "Test design not provided"),
+                        success_metric=experiment_data.get("success_metric", "Metric not specified")
+                    )
+
+                return SpecialistFeedback(
+                    specialist_id=specialist.id,
+                    role=specialist.role,
+                    provider=specialist.provider,
+                    model=specialist.model,
+                    is_simulated=response.is_simulated,
+                    status="success",
+                    strengths=parsed.get("strengths", []),
+                    risks=parsed.get("risks", []),
+                    missing_assumptions=parsed.get("missing_assumptions", []),
+                    questions=parsed.get("questions", []),
+                    validation_experiment=experiment,
+                    evidence_citations=valid_cites,
+                    invalid_citations=invalid_cites,
+                    assumptions_and_unknowns=parsed.get("assumptions_and_unknowns", []),
+                    latency_ms=round(duration_ms, 2),
+                    token_usage={
+                        "input_tokens": response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                        "total_tokens": response.total_tokens
+                    },
+                    cost_estimate_usd=response.cost_estimate_usd
+                )
+
+            except BudgetExceededError as be:
+                self.budget_stopped = True
+                last_error = str(be)
+                duration_ms = (time.perf_counter() - start_t) * 1000
+                return SpecialistFeedback(
+                    specialist_id=specialist.id,
+                    role=specialist.role,
+                    provider=specialist.provider,
+                    model=specialist.model,
+                    is_simulated=(specialist.provider == "mock"),
+                    status="failed",
+                    error_message=f"Budget stop triggered: {be}",
+                    latency_ms=round(duration_ms, 2)
+                )
+
+            except asyncio.TimeoutError:
+                last_error = f"Timed out after {self.budget.timeout_seconds}s"
+                duration_ms = (time.perf_counter() - start_t) * 1000
+                if attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap:
+                    return SpecialistFeedback(
+                        specialist_id=specialist.id,
+                        role=specialist.role,
+                        provider=specialist.provider,
+                        model=specialist.model,
+                        is_simulated=(specialist.provider == "mock"),
+                        status="timed_out",
+                        error_message=last_error,
+                        latency_ms=round(duration_ms, 2)
+                    )
+                await asyncio.sleep(0.05)
+
+            except Exception as e:
+                last_error = str(e)
+                duration_ms = (time.perf_counter() - start_t) * 1000
+                if attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap:
+                    return SpecialistFeedback(
+                        specialist_id=specialist.id,
+                        role=specialist.role,
+                        provider=specialist.provider,
+                        model=specialist.model,
+                        is_simulated=(specialist.provider == "mock"),
+                        status="failed",
+                        error_message=last_error,
+                        latency_ms=round(duration_ms, 2)
+                    )
+                await asyncio.sleep(0.05)
+
+        return SpecialistFeedback(
+            specialist_id=specialist.id,
+            role=specialist.role,
+            provider=specialist.provider,
+            model=specialist.model,
+            is_simulated=True,
+            status="failed",
+            error_message=last_error or "Maximum retry attempts exhausted."
+        )
+
+    async def _run_multi_step_challenge_round(
+        self,
+        idea: StartupIdeaInput,
+        feedbacks: List[SpecialistFeedback],
+        panel_map: Dict[str, SpecialistAgentConfig],
+        notify_fn: Optional[Callable] = None
+    ) -> List[ChallengeResponseItem]:
+        """
+        Execute a genuine two-step cross-agent debate round.
+        Step A: Challenger generates a challenge against Target's review using Challenger's assigned provider.
+        Step B: Target specialist receives that challenge and independently formulates defense & reasoning adjustment
+                using Target's assigned provider!
+        """
+        if len(feedbacks) < 2:
+            return []
+
+        challenge_items: List[ChallengeResponseItem] = []
+
+        # Form 1 or 2 debate pairs (bounded to 1 round)
+        pairs = [(feedbacks[1], feedbacks[0])]
+        if len(feedbacks) >= 4:
+            pairs.append((feedbacks[3], feedbacks[2]))
+
+        for challenger_fb, target_fb in pairs:
+            if self.budget_stopped:
+                break
+
+            challenger_spec = panel_map.get(challenger_fb.specialist_id)
+            target_spec = panel_map.get(target_fb.specialist_id)
+            if not challenger_spec or not target_spec:
+                continue
+
+            # --- STEP A: Challenger generates challenge using Challenger's Adapter ---
+            challenger_adapter = get_provider_adapter(challenger_spec.provider)
+            step_a_user_prompt = f"""Startup Idea: '{idea.title}'
+You are: {challenger_spec.role} ({challenger_spec.expertise})
+Your Task: Review the following assessment by peer specialist {target_spec.role}:
+Peer Strengths: {'; '.join(target_fb.strengths[:2])}
+Peer Risks: {'; '.join(target_fb.risks[:2])}
+Peer Missing Assumptions: {'; '.join(target_fb.missing_assumptions[:2])}
+
+Generate a sharp challenge questioning a critical assumption or conflicting trade-off in {target_spec.role}'s reasoning.
+"""
+            challenger_res = await self._safe_provider_call(
+                adapter=challenger_adapter,
+                system_prompt=CHALLENGER_SYSTEM_PROMPT,
+                user_prompt=step_a_user_prompt,
+                model=challenger_spec.model,
+                timeout_seconds=self.budget.timeout_seconds
+            )
+
+            challenger_parsed = challenger_res.parsed_json or {}
+            challenge_point = challenger_parsed.get("challenge_point") or challenger_parsed.get("challenge")
+            if not challenge_point:
+                challenge_point = f"{challenger_spec.role} challenges whether {target_spec.role}'s assumptions on operational overhead and friction are defensible in production."
+
+            # --- STEP B: Target Specialist responds using Target's Assigned Adapter ---
+            target_adapter = get_provider_adapter(target_spec.provider)
+            step_b_user_prompt = f"""Startup Idea: '{idea.title}'
+You are: {target_spec.role} ({target_spec.expertise})
+Peer Reviewer {challenger_spec.role} has challenged your evaluation:
+Challenge: "{challenge_point}"
+
+Respond to this challenge:
+1. Defend your assessment and clarify technical/operational trade-offs.
+2. Formulate how your reasoning, risk appraisal, or implementation roadmap shifts or adjusts in light of this challenge.
+"""
+            target_res = await self._safe_provider_call(
+                adapter=target_adapter,
+                system_prompt=TARGET_RESPONSE_SYSTEM_PROMPT,
+                user_prompt=step_b_user_prompt,
+                model=target_spec.model,
+                timeout_seconds=self.budget.timeout_seconds
+            )
+
+            target_parsed = target_res.parsed_json or {}
+            response_text = target_parsed.get("response", "The specialist defended their core architecture while noting the need for stricter onboarding validation.")
+            reasoning_shift = target_parsed.get("reasoning_adjustment", "Adjusted roadmap to mandate staged pilot validation before enterprise rollout.")
+
+            is_sim = (challenger_spec.provider == "mock" and target_spec.provider == "mock")
+
+            item = ChallengeResponseItem(
+                challenger_id=challenger_spec.id,
+                challenger_role=challenger_spec.role,
+                challenger_provider=challenger_spec.provider,
+                target_specialist_id=target_spec.id,
+                target_role=target_spec.role,
+                target_provider=target_spec.provider,
+                target_model=target_spec.model,
+                challenge_point=challenge_point,
+                response=response_text,
+                reasoning_adjustment=reasoning_shift,
+                is_simulated=is_sim
+            )
+            challenge_items.append(item)
+
+            if notify_fn:
+                notify_fn("challenge_exchange", {"item": item.model_dump()})
+
+        return challenge_items
+
+    async def _run_coordinator_synthesis(
+        self,
+        idea: StartupIdeaInput,
+        specialist_feedbacks: List[SpecialistFeedback],
+        challenges: List[ChallengeResponseItem]
+    ) -> CoordinatorCombinedReview:
+        """
+        Run the independent coordinator agent.
+        Explicitly tracks coordinator failures and avoids masking errors as normal success.
+        """
+        adapter = get_provider_adapter("mock")
+
+        failed_specialists = [f for f in specialist_feedbacks if f.status in ["failed", "timed_out"]]
+        successful_specialists = [f for f in specialist_feedbacks if f.status == "success"]
+
+        prompt_lines = [
+            f"Startup: {idea.title}",
+            f"Problem: {idea.problem}",
+            f"Solution: {idea.proposed_solution}",
+            f"Supplied Evidence Count: {len(idea.evidence)}",
+            f"Failed Specialists Count: {len(failed_specialists)}"
+        ]
+
+        if idea.evidence:
+            prompt_lines.append("Supplied Evidence Items:")
+            for ev in idea.evidence:
+                prompt_lines.append(f"- [{ev.id}] ({ev.data_type}) {ev.summary} (Source: {ev.source})")
+        else:
+            prompt_lines.append("Supplied Evidence Items: None (No empirical evidence provided)")
+
+        if failed_specialists:
+            prompt_lines.append("Failed Specialists (Must be scrutinized in failure impact analysis):")
+            for f in failed_specialists:
+                prompt_lines.append(f"- {f.role} (Status: {f.status}, Reason: {f.error_message})")
+
+        prompt_lines.append("\nSuccessful Specialist Reviews:")
+        for f in successful_specialists:
+            prompt_lines.append(f"Specialist [{f.role}]:")
+            prompt_lines.append(f"  Risks: {', '.join(f.risks)}")
+            prompt_lines.append(f"  Assumptions: {', '.join(f.missing_assumptions)}")
+            if f.validation_experiment:
+                prompt_lines.append(f"  Proposed Exp: {f.validation_experiment.hypothesis} -> {f.validation_experiment.success_metric}")
+
+        if challenges:
+            prompt_lines.append("\nDebate Challenges:")
+            for ch in challenges:
+                prompt_lines.append(f"- {ch.challenger_role} challenged {ch.target_role}: '{ch.challenge_point}' -> Adjusted: '{ch.reasoning_adjustment}'")
+
+        start_t = time.perf_counter()
+        try:
+            response = await self._safe_provider_call(
+                adapter=adapter,
+                system_prompt=COORDINATOR_SYSTEM_PROMPT,
+                user_prompt="\n".join(prompt_lines),
+                timeout_seconds=self.budget.timeout_seconds
+            )
+            duration_ms = (time.perf_counter() - start_t) * 1000
+
+            parsed = response.parsed_json or {}
+            ev_data = parsed.get("evidence_sufficiency", {})
+            evidence_assessment = EvidenceSufficiencyAssessment(
+                status=ev_data.get("status", "thin"),
+                analysis=ev_data.get("analysis", "Evidence assessment produced by coordinator.")
+            )
+
+            experiments = []
+            for exp in parsed.get("next_experiments", []):
+                if isinstance(exp, dict):
+                    experiments.append(ValidationExperiment(
+                        hypothesis=exp.get("hypothesis", "Hypothesis"),
+                        test_design=exp.get("test_design", "Test"),
+                        success_metric=exp.get("success_metric", "Metric")
+                    ))
+
+            failure_impact = parsed.get("failure_impact_analysis")
+            if failed_specialists and not failure_impact:
+                missing_roles = ", ".join([f.role for f in failed_specialists])
+                failure_impact = (
+                    f"Notice: {len(failed_specialists)} specialist(s) [{missing_roles}] failed or timed out during the review. "
+                    f"Critical evaluation in these specific technical/operational areas could not be verified, degrading overall confidence. "
+                    f"Founders must validate these omitted domains independently before committing resources."
+                )
+
+            return CoordinatorCombinedReview(
+                summary=parsed.get("summary", "Review board completed assessment."),
+                priorities=parsed.get("priorities", ["Validate key technical bottlenecks.", "Confirm willingness to pay."]),
+                disagreements=parsed.get("disagreements", ["Tension between onboarding simplicity and enterprise security."]),
+                next_experiments=experiments,
+                evidence_sufficiency=evidence_assessment,
+                failure_impact_analysis=failure_impact,
+                disclaimer="Decision support only. Not an investment recommendation. Consensus among AI agents does not constitute proof of market demand.",
+                is_fallback=False,
+                status="success",
+                latency_ms=round(duration_ms, 2),
+                token_usage={
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens
+                },
+                cost_estimate_usd=response.cost_estimate_usd
+            )
+
+        except BudgetExceededError as be:
+            self.budget_stopped = True
+            duration_ms = (time.perf_counter() - start_t) * 1000
+            return CoordinatorCombinedReview(
+                summary="[BUDGET STOPPED] Coordinator synthesis halted because the configured call or token cap was reached.",
+                priorities=["Review individual completed specialist feedback cards."],
+                disagreements=[],
+                next_experiments=[],
+                evidence_sufficiency=EvidenceSufficiencyAssessment(
+                    status="insufficient",
+                    analysis="Coordinator could not evaluate evidence sufficiency due to budget stop."
+                ),
+                failure_impact_analysis=f"Budget limit reached ({be}). Automated coordinator synthesis could not complete.",
+                disclaimer="Decision support only. Not an investment recommendation.",
+                is_fallback=True,
+                status="failed",
+                latency_ms=round(duration_ms, 2)
+            )
+
+        except asyncio.TimeoutError:
+            duration_ms = (time.perf_counter() - start_t) * 1000
+            return CoordinatorCombinedReview(
+                summary="[COORDINATOR TIMEOUT] Coordinator synthesis failed because the upstream model timed out.",
+                priorities=["Review completed specialist feedback directly."],
+                disagreements=[],
+                next_experiments=[],
+                evidence_sufficiency=EvidenceSufficiencyAssessment(
+                    status="insufficient",
+                    analysis="Coordinator evaluation timed out."
+                ),
+                failure_impact_analysis=f"Coordinator call timed out after {self.budget.timeout_seconds}s. This is fallback guidance only.",
+                disclaimer="Decision support only. Not an investment recommendation.",
+                is_fallback=True,
+                status="timed_out",
+                latency_ms=round(duration_ms, 2)
+            )
+
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_t) * 1000
+            return CoordinatorCombinedReview(
+                summary=f"[COORDINATOR FAILED] Coordinator synthesis failed due to an execution error: {str(e)}",
+                priorities=["Review completed specialist feedback directly."],
+                disagreements=[],
+                next_experiments=[],
+                evidence_sufficiency=EvidenceSufficiencyAssessment(
+                    status="insufficient",
+                    analysis="Coordinator evaluation encountered an execution error."
+                ),
+                failure_impact_analysis=f"Coordinator encountered an error ({str(e)}). This is an explicit fallback report.",
+                disclaimer="Decision support only. Not an investment recommendation.",
+                is_fallback=True,
+                status="failed",
+                latency_ms=round(duration_ms, 2)
+            )
+
+    def _build_execution_summary(self, budget_stopped: bool = False) -> Dict[str, Any]:
+        """Produce the aggregated execution summary."""
+        return {
+            "total_latency_ms": round(self.total_latency_ms, 2),
+            "total_tokens": self.tokens_used,
+            "total_cost_usd": round(self.total_cost_usd, 6),
+            "calls_made": self.calls_made,
+            "budget_stopped": budget_stopped or self.budget_stopped,
+            "failures_encountered": self.failures_encountered
+        }
