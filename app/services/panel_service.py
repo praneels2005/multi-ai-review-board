@@ -62,6 +62,7 @@ Supplied Evidence:
 """
 
         response = await adapter.call(
+            task="panel_generation",
             system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             model=model,
@@ -76,6 +77,7 @@ Supplied Evidence:
             # Fallback to deterministic generation if parsing failed or fewer than 3 generated
             mock_adapter = get_provider_adapter("mock")
             fallback_res = await mock_adapter.call(
+                task="panel_generation",
                 system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 model="mock-deterministic"

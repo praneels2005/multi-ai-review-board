@@ -5,11 +5,17 @@ cost calculators, and prompt sanitization defenses.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, Type
+from typing import Optional, Dict, Any, Type, Literal
 import json
 import re
 import time
 from pydantic import BaseModel, Field
+
+
+AITask = Literal[
+    "panel_generation", "specialist_review", "challenge_generation",
+    "challenge_response", "coordinator_synthesis",
+]
 
 
 class NormalizedProviderResponse(BaseModel):
@@ -40,8 +46,15 @@ class BaseAIAdapter(ABC):
         timeout_seconds: float = 15.0,
         temperature: float = 0.2,
         simulate_failure: Optional[str] = None,
+        *,
+        task: AITask = "specialist_review",
     ) -> NormalizedProviderResponse:
-        """Execute a call to the underlying provider and return a normalized response."""
+        """Execute a caller-selected task and return a normalized response.
+
+        Task is internal routing metadata, never inferred from prompt content.
+        Live adapters use the supplied prompts; mock uses task to select its generator.
+        The default preserves existing standalone specialist-review callers.
+        """
         pass
 
     @staticmethod

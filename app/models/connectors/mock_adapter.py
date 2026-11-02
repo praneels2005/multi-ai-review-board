@@ -11,7 +11,7 @@ import json
 import re
 import time
 from typing import Optional, Dict, Any
-from app.models.connectors.base_connector import BaseAIAdapter, NormalizedProviderResponse
+from app.models.connectors.base_connector import AITask, BaseAIAdapter, NormalizedProviderResponse
 
 
 class DeterministicMockAdapter(BaseAIAdapter):
@@ -26,6 +26,8 @@ class DeterministicMockAdapter(BaseAIAdapter):
         timeout_seconds: float = 15.0,
         temperature: float = 0.2,
         simulate_failure: Optional[str] = None,
+        *,
+        task: AITask = "specialist_review",
     ) -> NormalizedProviderResponse:
         start_time = time.perf_counter()
         active_model = model or "mock-deterministic"
@@ -62,7 +64,7 @@ class DeterministicMockAdapter(BaseAIAdapter):
         await asyncio.sleep(0.15)
 
         # Generate deterministic response based on prompt contents
-        parsed_data = self._generate_deterministic_content(system_prompt, user_prompt)
+        parsed_data = self._generate_deterministic_content(task, system_prompt, user_prompt)
         raw_text = json.dumps(parsed_data, indent=2)
 
         latency = (time.perf_counter() - start_time) * 1000
@@ -85,32 +87,21 @@ class DeterministicMockAdapter(BaseAIAdapter):
             error=None
         )
 
-    def _generate_deterministic_content(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        """Dispatch based on the target task inferred from prompts."""
-        lower_prompt = (system_prompt + " " + user_prompt).lower()
-
-        # 1. Panel Generation
-        if "generate" in lower_prompt and "specialist" in lower_prompt and ("panel" in lower_prompt or "mandate" in lower_prompt):
+    def _generate_deterministic_content(
+        self, task: AITask, system_prompt: str, user_prompt: str
+    ) -> Dict[str, Any]:
+        """Select the operation from trusted caller metadata, never prompt text."""
+        if task == "panel_generation":
             return self._generate_panel(user_prompt)
-
-        # 2. Coordinator Synthesis
-        if "coordinator" in lower_prompt or "combined review" in lower_prompt or "synthesize" in lower_prompt:
-            return self._generate_coordinator_synthesis(user_prompt)
-
-        # 3. Dedicated Target Response to Challenge
-        if "target specialist responding" in lower_prompt or "defend your position" in lower_prompt or "responding to peer challenge" in lower_prompt:
-            return self._generate_target_defense(user_prompt)
-
-        # 4. Dedicated Challenger Generation
-        if "generate a sharp challenge" in lower_prompt or "identify one sharp point of disagreement" in lower_prompt or "cross-examination" in lower_prompt:
+        if task == "specialist_review":
+            return self._generate_specialist_feedback(system_prompt, user_prompt)
+        if task == "challenge_generation":
             return self._generate_challenger_point(user_prompt)
-
-        # 5. Fallback Legacy Challenge Round (both sides in one)
-        if "challenge" in lower_prompt or "debate" in lower_prompt:
-            return self._generate_challenge_response(user_prompt)
-
-        # 6. Default: Specialist Feedback
-        return self._generate_specialist_feedback(system_prompt, user_prompt)
+        if task == "challenge_response":
+            return self._generate_target_defense(user_prompt)
+        if task == "coordinator_synthesis":
+            return self._generate_coordinator_synthesis(user_prompt)
+        raise ValueError(f"Unsupported AI task: {task!r}")
 
     def _generate_panel(self, user_prompt: str) -> Dict[str, Any]:
         """Generate domain-relevant specialists depending on startup type."""

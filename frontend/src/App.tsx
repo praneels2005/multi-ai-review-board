@@ -863,12 +863,15 @@ export default function App() {
                           <select
                             value={spec.provider}
                             onChange={(e) => {
-                              const p = e.target.value as any;
+                              const p = e.target.value as SpecialistAgentConfig['provider'];
                               let defaultModel = 'mock-deterministic';
                               if (p === 'openai') defaultModel = 'gpt-4o-mini';
                               if (p === 'gemini') defaultModel = 'gemini-1.5-flash';
-                              updateSpecialist(idx, 'provider', p);
-                              updateSpecialist(idx, 'model', defaultModel);
+                              setPanel(previous => previous.map((specialist, index) =>
+                                index === idx
+                                  ? { ...specialist, provider: p, model: defaultModel }
+                                  : specialist
+                              ));
                             }}
                             className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
                           >

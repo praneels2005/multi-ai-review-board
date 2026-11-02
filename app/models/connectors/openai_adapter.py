@@ -9,7 +9,7 @@ import json
 import time
 from typing import Optional, Dict, Any
 from app.config.settings import settings
-from app.models.connectors.base_connector import BaseAIAdapter, NormalizedProviderResponse
+from app.models.connectors.base_connector import AITask, BaseAIAdapter, NormalizedProviderResponse
 
 
 class OpenAIAdapter(BaseAIAdapter):
@@ -34,6 +34,8 @@ class OpenAIAdapter(BaseAIAdapter):
         timeout_seconds: float = 15.0,
         temperature: float = 0.2,
         simulate_failure: Optional[str] = None,
+        *,
+        task: AITask = "specialist_review",
     ) -> NormalizedProviderResponse:
         active_model = model or "gpt-4o-mini"
         start_time = time.perf_counter()

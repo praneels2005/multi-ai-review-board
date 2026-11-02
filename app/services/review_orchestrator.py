@@ -28,7 +28,7 @@ from app.schemas.review_board_schema import (
     ReviewBoardSession,
 )
 from app.models.connectors.factory import get_provider_adapter
-from app.models.connectors.base_connector import NormalizedProviderResponse
+from app.models.connectors.base_connector import AITask, NormalizedProviderResponse
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,7 @@ class ReviewBoardOrchestrator:
     async def _safe_provider_call(
         self,
         adapter,
+        task: AITask,
         system_prompt: str,
         user_prompt: str,
         model: Optional[str] = None,
@@ -174,6 +175,7 @@ class ReviewBoardOrchestrator:
 
         # 4. Invoke Provider
         response = await adapter.call(
+            task=task,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             model=model,
@@ -357,6 +359,7 @@ Supplied Evidence Items:
                 # Enforce budget reservation on EVERY attempt
                 response = await self._safe_provider_call(
                     adapter=adapter,
+                    task="specialist_review",
                     system_prompt=SPECIALIST_REVIEW_SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     model=specialist.model,
@@ -518,6 +521,7 @@ Generate a sharp challenge questioning a critical assumption or conflicting trad
 """
             challenger_res = await self._safe_provider_call(
                 adapter=challenger_adapter,
+                task="challenge_generation",
                 system_prompt=CHALLENGER_SYSTEM_PROMPT,
                 user_prompt=step_a_user_prompt,
                 model=challenger_spec.model,
@@ -542,6 +546,7 @@ Respond to this challenge:
 """
             target_res = await self._safe_provider_call(
                 adapter=target_adapter,
+                task="challenge_response",
                 system_prompt=TARGET_RESPONSE_SYSTEM_PROMPT,
                 user_prompt=step_b_user_prompt,
                 model=target_spec.model,
@@ -626,6 +631,7 @@ Respond to this challenge:
         try:
             response = await self._safe_provider_call(
                 adapter=adapter,
+                task="coordinator_synthesis",
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
                 user_prompt="\n".join(prompt_lines),
                 timeout_seconds=self.budget.timeout_seconds
