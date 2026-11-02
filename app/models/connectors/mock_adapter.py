@@ -2,11 +2,13 @@
 Deterministic Mock Adapter for Multiple AI Review Board.
 Provides offline, deterministic, rich generation without requiring any API keys.
 Accurately simulates latency, token usage, cost, and failure modes for testing.
+Grounded strictly in supplied evidence (not superficial keywords).
 """
 
 import asyncio
 import hashlib
 import json
+import re
 import time
 from typing import Optional, Dict, Any
 from app.models.connectors.base_connector import BaseAIAdapter, NormalizedProviderResponse
@@ -30,7 +32,6 @@ class DeterministicMockAdapter(BaseAIAdapter):
 
         # Handle failure simulations for tests and demo walkthroughs
         if simulate_failure == "timeout":
-            # Sleep longer than timeout or simulate immediate timeout
             if timeout_seconds > 0:
                 await asyncio.sleep(min(timeout_seconds + 0.5, 2.0))
             raise asyncio.TimeoutError(f"Provider call to {active_model} timed out after {timeout_seconds}s")
@@ -57,8 +58,8 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 error="Malformed JSON response from mock provider"
             )
 
-        # Realistic simulated network latency (150ms to 400ms)
-        await asyncio.sleep(0.2)
+        # Realistic simulated network latency (150ms to 350ms)
+        await asyncio.sleep(0.15)
 
         # Generate deterministic response based on prompt contents
         parsed_data = self._generate_deterministic_content(system_prompt, user_prompt)
@@ -96,11 +97,19 @@ class DeterministicMockAdapter(BaseAIAdapter):
         if "coordinator" in lower_prompt or "combined review" in lower_prompt or "synthesize" in lower_prompt:
             return self._generate_coordinator_synthesis(user_prompt)
 
-        # 3. Challenge and Response
-        if "challenge" in lower_prompt or "debate" in lower_prompt or "cross-examination" in lower_prompt:
+        # 3. Dedicated Target Response to Challenge
+        if "target specialist responding" in lower_prompt or "defend your position" in lower_prompt or "responding to peer challenge" in lower_prompt:
+            return self._generate_target_defense(user_prompt)
+
+        # 4. Dedicated Challenger Generation
+        if "generate a sharp challenge" in lower_prompt or "identify one sharp point of disagreement" in lower_prompt or "cross-examination" in lower_prompt:
+            return self._generate_challenger_point(user_prompt)
+
+        # 5. Fallback Legacy Challenge Round (both sides in one)
+        if "challenge" in lower_prompt or "debate" in lower_prompt:
             return self._generate_challenge_response(user_prompt)
 
-        # 4. Default: Specialist Feedback
+        # 6. Default: Specialist Feedback
         return self._generate_specialist_feedback(system_prompt, user_prompt)
 
     def _generate_panel(self, user_prompt: str) -> Dict[str, Any]:
@@ -253,35 +262,42 @@ class DeterministicMockAdapter(BaseAIAdapter):
         return {"specialists": specialists}
 
     def _generate_specialist_feedback(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        """Generate independent specialist review with cited evidence and assumptions."""
+        """Generate independent specialist review grounded strictly in supplied evidence."""
         prompt_lower = (system_prompt + " " + user_prompt).lower()
-        role = "Domain Specialist"
-        if "role:" in prompt_lower:
-            role = prompt_lower.split("role:")[1].split("\n")[0].strip()
 
-        # Check for evidence IDs provided in prompt
+        # Check explicitly for evidence IDs supplied in prompt text
+        has_e1 = bool(re.search(r'\[e1\]|id:\s*e1', prompt_lower))
+        has_e2 = bool(re.search(r'\[e2\]|id:\s*e2', prompt_lower))
         cited_evidence = []
-        if "e1" in prompt_lower:
+        if has_e1:
             cited_evidence.append("E1")
-        if "e2" in prompt_lower and "metric" in prompt_lower:
+        if has_e2:
             cited_evidence.append("E2")
 
-        # Specific feedback based on domain keywords
+        has_any_evidence = len(cited_evidence) > 0
+
+        # Ground feedback in specific domain
         if "ebpf" in prompt_lower or "tracing" in prompt_lower or "developer" in prompt_lower:
+            strength_e1 = "Benchmark evidence [E1] indicates sub-2% CPU overhead on synthetic microservice loads." if "E1" in cited_evidence else "Architectural approach eliminates manual SDK code injection across polyglot microservice repos."
+            strength_e2 = "Customer discovery interviews [E2] confirm target platform engineers experience strong APM cost fatigue." if "E2" in cited_evidence else "Kernel-level visibility provides unified latency traces without user-space runtime hooks."
+
             strengths = [
                 "Zero-instrumentation telemetry drastically reduces developer onboarding friction compared to SDK injection.",
-                "Citing benchmark data [E1] demonstrates sub-2% CPU overhead on representative containerized workloads." if "E1" in cited_evidence else "eBPF kernel-level visibility bypasses application runtime hooks, eliminating user-space code pollution.",
-                "Direct alignment with DevOps pain points regarding excessive Datadog logging and APM egress fees."
+                strength_e1,
+                strength_e2
             ]
             risks = [
                 "Requires elevated Linux kernel capabilities (CAP_BPF / root daemonset), which enterprise security teams actively block in shared multi-tenant clusters.",
-                "Kernel version fragmentation: eBPF CO-RE (Compile Once - Run Everywhere) can fail on older enterprise distributions (e.g. RHEL 7/8, legacy cloud AMIs).",
+                "Kernel version fragmentation: eBPF CO-RE can fail on older enterprise distributions (e.g. RHEL 7/8, legacy cloud AMIs).",
                 "High customer support burden debugging kernel probes across bespoke enterprise microservice topologies."
             ]
             missing_assumptions = [
                 "Assumes engineering teams have permission to deploy privileged DaemonSets into enterprise production environments.",
                 "Assumes developers who inspect traces are the same budget holders willing to displace existing contract commitments."
             ]
+            if not has_any_evidence:
+                missing_assumptions.append("CRITICAL: Zero empirical evidence was provided verifying CPU overhead claims under production workloads.")
+
             questions = [
                 "How does the agent gracefully handle non-supported Linux kernels or locked-down hardened host nodes?",
                 "What is the fallback mechanism when eBPF verifier rejects custom filter programs under memory pressure?"
@@ -295,12 +311,17 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 "Assumption: Enterprises will prioritize lower observability overhead over established single-pane-of-glass dashboards.",
                 "Unknown: Exact egress bandwidth cost for shipping high-frequency trace vectors across AWS availability zones."
             ]
+            if not has_any_evidence:
+                assumptions.append("Unbacked Assumption: Sub-1.5% CPU overhead claim is completely unverified by empirical benchmark data.")
 
         elif "cosmetic" in prompt_lower or "refill" in prompt_lower or "sustainable" in prompt_lower:
+            strength_e1 = "Paid ad campaign data [E1] indicates viable early customer acquisition interest at $2.22 CPA." if "E1" in cited_evidence else "Closed-loop brand story creates emotional loyalty and strong word-of-mouth defensibility."
+            strength_e2 = "Pilot return data [E2] quantifies baseline container return rate (42%), identifying exact retention friction." if "E2" in cited_evidence else "High repeat purchase potential if refill cycle matches household consumption cadence."
+
             strengths = [
                 "Strong consumer alignment with sustainability trends and zero-waste bathroom aesthetics.",
-                "Citing pilot data [E1] suggests early customer appetite, with reasonable initial acquisition costs." if "E1" in cited_evidence else "High repeat purchase potential if refill cycle matches household consumption cadence.",
-                "Closed-loop brand story creates emotional loyalty and word-of-mouth defensibility."
+                strength_e1,
+                strength_e2
             ]
             risks = [
                 "Reverse logistics cost per unit: USPS/parcel return postage, cleaning, and quality inspection frequently exceed original bottle manufacturing cost.",
@@ -311,6 +332,9 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 "Assumes customer return rate of empty containers exceeds 60% without requiring unsustainable cash deposits.",
                 "Assumes formula viscosity allows complete bottle emptying without leaving 10-15% product residue that ruins cleaning cycles."
             ]
+            if not has_any_evidence:
+                missing_assumptions.append("CRITICAL: Zero empirical data on actual container return rates or reverse logistics shipping expenses.")
+
             questions = [
                 "What is the exact net cost per returned container including outbound return bag, postage, sanitization, and discard rate?",
                 "How do you prevent microbial cross-contamination across multiple refill generations?"
@@ -324,11 +348,14 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 "Assumption: Sustainable consumers will tolerate paying a 15-20% price premium over drugstore alternatives for closed-loop packaging.",
                 "Unknown: Long-term pump mechanism degradation over 5+ dishwashing cycles."
             ]
+            if not has_any_evidence:
+                assumptions.append("Unbacked Assumption: Customer willingness to return empties by mail has zero empirical backing.")
 
         elif "sleep" in prompt_lower or "brainwave" in prompt_lower or "acoustic" in prompt_lower:
             strengths = [
                 "Massive addressable market driven by widespread adult sleep dissatisfaction and insomnia complaints.",
-                "Non-invasive acoustic approach eliminates the ingestion side-effects associated with pharmaceutical sleep aids."
+                "Non-invasive acoustic approach eliminates the ingestion side-effects associated with pharmaceutical sleep aids.",
+                "High willingness to pay for non-pharmacological sleep interventions among biohackers and tech executives."
             ]
             risks = [
                 "Zero clinical backing: No double-blind PSG (polysomnography) sleep studies validating acoustic brainwave entrainment through pillow textiles.",
@@ -339,13 +366,18 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 "Critically assumes acoustic frequencies through pillow foam can entrain brainwaves through skull bone conduction during active sleep.",
                 "Assumes consumers will sleep comfortably with electronic transducers directly beneath their ears."
             ]
+            if "E1" in cited_evidence:
+                missing_assumptions.append("Relies on single-person anecdotal diary [E1], which lacks statistical validity, sham controls, and EEG verification.")
+            else:
+                missing_assumptions.append("CRITICAL: Zero scientific or empirical data provided regarding acoustic entrainment or sleep onset latency.")
+
             questions = [
                 "Where is the empirical clinical data demonstrating statistically significant EEG delta wave phase-locking?",
                 "What legal disclaimers prevent FTC action regarding unsubstantiated sleep improvement claims?"
             ]
             experiment = {
                 "hypothesis": "Users sleeping on the prototype show statistically significant increase in deep (N3) sleep compared to a sham sound control.",
-                "test_design": "Run a 20-person randomized crossover trial using validated consumer EEG headbands (e.g. Muse or Dreem) comparing active entrainment vs pink noise.",
+                "test_design": "Run a 20-person randomized crossover trial using validated consumer EEG headbands comparing active entrainment vs pink noise.",
                 "success_metric": "Statistically significant (p < 0.05) increase in N3 deep sleep duration with zero comfort-induced awakenings."
             }
             assumptions = [
@@ -356,7 +388,8 @@ class DeterministicMockAdapter(BaseAIAdapter):
         else:
             strengths = [
                 "Addresses a clearly defined operational friction point with demonstrable buyer utility.",
-                "Modular architecture allows incremental rollout without requiring high upfront migration costs."
+                "Modular architecture allows incremental rollout without requiring high upfront migration costs.",
+                "Value proposition aligns with cost consolidation priorities."
             ]
             risks = [
                 "Competitive vulnerability to platform incumbents who can replicate core features into existing bundles.",
@@ -366,6 +399,9 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 "Assumes users will actively adopt a new interface rather than sticking to default spreadsheets or existing tooling.",
                 "Assumes high willingness to pay without verified pricing elasticity studies."
             ]
+            if not has_any_evidence:
+                missing_assumptions.append("CRITICAL: No empirical evidence supplied to demonstrate customer willingness to pay or prototype performance.")
+
             questions = [
                 "What is the single most compelling trigger that forces a prospect to evaluate your solution today?",
                 "How does the product maintain defensibility against open-source alternatives?"
@@ -391,96 +427,108 @@ class DeterministicMockAdapter(BaseAIAdapter):
             "assumptions_and_unknowns": assumptions
         }
 
-    def _generate_challenge_response(self, user_prompt: str) -> Dict[str, Any]:
-        """Generate bounded challenge and response debate between specialists."""
+    def _generate_challenger_point(self, user_prompt: str) -> Dict[str, Any]:
+        """Generate a single sharp challenge point from the challenger specialist."""
         prompt_lower = user_prompt.lower()
-
-        if "ebpf" in prompt_lower or "tracing" in prompt_lower or "developer" in prompt_lower:
+        if "ebpf" in prompt_lower or "tracing" in prompt_lower or "kernel" in prompt_lower:
             return {
-                "challenges": [
-                    {
-                        "challenger_id": "spec_2",
-                        "challenger_role": "Cloud Infrastructure & Kernel Systems Architect",
-                        "target_specialist_id": "spec_1",
-                        "target_role": "Developer Experience & CLI Usability Specialist",
-                        "challenge_point": "You prioritize seamless 1-click CLI onboarding, but deploying eBPF probes requires privileged host access (CAP_SYS_ADMIN / CAP_BPF) that no enterprise platform engineer will grant via a developer-facing CLI tool.",
-                        "response": "Understood. Rather than executing root commands locally, our CLI can generate standard GitOps Kubernetes manifests (Helm/Kustomize) that route through the security team's approval pipeline, maintaining dev-ex for tracing while honoring infra governance.",
-                        "reasoning_adjustment": "Adjusted adoption model: shift from rogue bottom-up developer installation to a platform-engineered self-serve model with pre-approved RBAC permissions."
-                    },
-                    {
-                        "challenger_id": "spec_4",
-                        "challenger_role": "Open-Core & Enterprise GTM Strategist",
-                        "target_specialist_id": "spec_3",
-                        "target_role": "DevSecOps & Compliance Auditor",
-                        "challenge_point": "Your recommendation to redact all payload telemetry by default neutralizes our primary enterprise value proposition—debugging root causes in distributed microservice transactions.",
-                        "response": "Payload redaction must be configurable at the edge, using regex patterns and PII tokenization before network egress, ensuring enterprise compliance without stripping payload metadata needed for diagnosis.",
-                        "reasoning_adjustment": "Risk appraisal updated: compliance is maintained via automated client-side data tokenization rather than blanket payload stripping."
-                    }
-                ]
+                "challenge_point": "Your recommendation to deploy via a 1-click developer CLI assumes engineering teams have root Kubernetes daemonset permissions (CAP_BPF / CAP_SYS_ADMIN), which enterprise security and platform teams actively prohibit in production clusters."
             }
-        elif "cosmetic" in prompt_lower or "refill" in prompt_lower or "sustainable" in prompt_lower:
+        elif "cosmetic" in prompt_lower or "refill" in prompt_lower or "logistics" in prompt_lower:
             return {
-                "challenges": [
-                    {
-                        "challenger_id": "spec_4",
-                        "challenger_role": "Unit Economics & Packaging Procurement Analyst",
-                        "target_specialist_id": "spec_1",
-                        "target_role": "Sustainable Supply Chain & Reverse Logistics Specialist",
-                        "challenge_point": "Your reverse logistics model assumes a $1.80 return shipping cost, but low-density parcel return rates through USPS parcel select will exceed $3.40 per bottle, wiping out gross margin on refills.",
-                        "response": "To preserve margin, returns should not happen per bottle. Customers must accumulate a minimum of 3 empty containers in a batch-mailer before shipping, reducing per-unit reverse freight to $1.15.",
-                        "reasoning_adjustment": "Logistical adjustment: customer refill schedule updated to batch-returns every 90 days rather than single-bottle return loops."
-                    }
-                ]
+                "challenge_point": "Your retention model assumes customer container returns cost under $1.50, but single-bottle reverse parcel postage through USPS parcel select will exceed $3.40 per bottle, wiping out gross product margin on refills."
             }
-        elif "sleep" in prompt_lower or "brainwave" in prompt_lower or "acoustic" in prompt_lower:
+        elif "sleep" in prompt_lower or "brainwave" in prompt_lower or "neuro" in prompt_lower:
             return {
-                "challenges": [
-                    {
-                        "challenger_id": "spec_1",
-                        "challenger_role": "Neurobiology & Sleep Medicine Researcher",
-                        "target_specialist_id": "spec_3",
-                        "target_role": "FDA Regulatory & Health Claims Attorney",
-                        "challenge_point": "You suggest softening marketing claims to 'general relaxation' to evade FDA 510(k) scrutiny, but doing so strips the product of any medical credibility and fails to justify its premium $299 price tag.",
-                        "response": "We must bifurcate the roadmap: launch first under FTC-compliant wellness claims to generate non-clinical cash flow, while concurrently funding a formal sham-controlled clinical trial for future medical certification.",
-                        "reasoning_adjustment": "Strategic roadmap updated: staged market entry separating immediate wellness revenue from long-term clinical trial validation."
-                    }
-                ]
+                "challenge_point": "You suggest marketing this as a general wellness sleep aid to bypass FDA Class II medical device requirements, but doing so strips away medical credibility and fails to justify a premium $299 price point without double-blind PSG clinical data."
             }
         else:
             return {
-                "challenges": [
-                    {
-                        "challenger_id": "spec_3",
-                        "challenger_role": "GTM & Competitive Differentiation Strategist",
-                        "target_specialist_id": "spec_1",
-                        "target_role": "Product-Market Fit & Customer Discovery Specialist",
-                        "challenge_point": "Customer interviews may confirm users dislike existing tools, but dissatisfaction does not prove willingness to switch workflows or migrate data.",
-                        "response": "Agreed. We must measure friction tolerance by requiring early design partners to export and connect live test data before admitting them to the pilot.",
-                        "reasoning_adjustment": "Validation threshold tightened: qualification now requires active data connection commitment rather than verbal interest."
-                    }
-                ]
+                "challenge_point": "Your customer discovery findings show strong qualitative dissatisfaction with existing tools, but dissatisfaction does not prove willingness to migrate production data or incur workflow switching costs."
             }
 
+    def _generate_target_defense(self, user_prompt: str) -> Dict[str, Any]:
+        """Generate target specialist defense and reasoning shift in response to challenge."""
+        prompt_lower = user_prompt.lower()
+        if "cap_bpf" in prompt_lower or "daemonset" in prompt_lower or "root" in prompt_lower or "ebpf" in prompt_lower:
+            return {
+                "response": "Valid concern. Instead of running root probes from an ad-hoc developer CLI, the CLI will output standard Helm / GitOps manifests that route through platform engineering's formal review, allowing security to audit kernel probes before deployment.",
+                "reasoning_adjustment": "Adoption model adjusted: pivot from unapproved bottom-up developer installation to pre-approved platform engineering GitOps templates with RBAC controls."
+            }
+        elif "postage" in prompt_lower or "reverse" in prompt_lower or "bottle" in prompt_lower:
+            return {
+                "response": "To protect gross margin, returns should not occur on a per-bottle cadence. Customers will receive a batch-mailer and return empties in batches of 3 every 90 days, bringing per-unit return postage down to $1.15.",
+                "reasoning_adjustment": "Fulfillment schedule adjusted: moved from single-bottle return loops to 90-day batched return mailers to maintain >50% gross margin."
+            }
+        elif "fda" in prompt_lower or "wellness" in prompt_lower or "clinical" in prompt_lower:
+            return {
+                "response": "We will stage commercialization into two phases: launch initially under FTC-compliant wellness claims for cash flow, while allocating 30% of proceeds toward a formal 20-person sham-controlled EEG clinical trial for future medical certification.",
+                "reasoning_adjustment": "Go-to-market shifted to a two-phase roadmap: near-term consumer wellness positioning followed by rigorous sham-controlled clinical trial data."
+            }
+        else:
+            return {
+                "response": "Agreed that verbal intent is insufficient. We will require early pilot prospects to connect a read-only test data source during onboarding before granting free pilot access.",
+                "reasoning_adjustment": "Pilot qualification gate tightened: qualification now requires active data connection commitment rather than verbal interest."
+            }
+
+    def _generate_challenge_response(self, user_prompt: str) -> Dict[str, Any]:
+        """Legacy dual challenge generator for backward compatibility."""
+        ch = self._generate_challenger_point(user_prompt)["challenge_point"]
+        resp_data = self._generate_target_defense(ch)
+        return {
+            "challenges": [
+                {
+                    "challenger_id": "spec_2",
+                    "challenger_role": "Platform Systems Architect",
+                    "target_specialist_id": "spec_1",
+                    "target_role": "Developer Experience Specialist",
+                    "challenge_point": ch,
+                    "response": resp_data["response"],
+                    "reasoning_adjustment": resp_data["reasoning_adjustment"]
+                }
+            ]
+        }
+
     def _generate_coordinator_synthesis(self, user_prompt: str) -> Dict[str, Any]:
-        """Synthesize independent reviews, highlight disagreements, evaluate evidence sufficiency, and note failure impact."""
+        """
+        Synthesize independent reviews, highlight disagreements, evaluate evidence sufficiency,
+        and note failure impact.
+        CRITICAL: Evidence sufficiency is determined STRICTLY by analyzing the supplied evidence
+        items and evidence count in the prompt, NOT by superficial idea keywords!
+        """
         prompt_lower = user_prompt.lower()
 
         # Check if an agent failure was reported in prompt
         failure_detected = "failure" in prompt_lower or "failed" in prompt_lower or "timed out" in prompt_lower
         failure_impact = None
         if failure_detected:
-            failure_impact = "One or more specialist agents failed or timed out during the review board run. As a result, specific technical facets (e.g. detailed kernel or dev-ex verification) could not be comprehensively scrutinized. Confidence in those specific domains is lower, and the founding team should manually consult domain experts before committing engineering resources."
+            failure_impact = "One or more specialist agents failed or timed out during the review board run. As a result, specific technical or operational perspectives could not be comprehensively evaluated. Overall confidence in those domains is degraded; founders must manually consult domain specialists before proceeding."
 
-        # Evaluate evidence sufficiency
-        if "sleep" in prompt_lower or "brainwave" in prompt_lower or "thin" in prompt_lower:
+        # Parse evidence items strictly from prompt
+        # We look for "Supplied Evidence Count: N" or evidence markers
+        evidence_count_match = re.search(r"supplied evidence count:\s*(\d+)", prompt_lower)
+        ev_count = int(evidence_count_match.group(1)) if evidence_count_match else 0
+
+        # Inspect evidence text block if present
+        has_benchmark = "(benchmark)" in prompt_lower or "data_type: benchmark" in prompt_lower
+        has_interview = "(customer_interview)" in prompt_lower or "(interview)" in prompt_lower
+        has_metric = "(metric)" in prompt_lower or "data_type: metric" in prompt_lower
+        has_pilot = "(pilot)" in prompt_lower
+        has_anecdote_only = "(anecdote)" in prompt_lower and not (has_benchmark or has_interview or has_metric or has_pilot)
+        no_evidence = ev_count == 0 or "no empirical evidence supplied" in prompt_lower or "supplied evidence items:\nnone" in prompt_lower
+
+        if no_evidence:
+            evidence_status = "insufficient"
+            evidence_analysis = "No empirical evidence was supplied. All claims regarding market demand, technical performance, and customer willingness to pay represent unverified founder assumptions requiring immediate ground-up validation."
+        elif has_anecdote_only or ev_count == 1:
             evidence_status = "thin"
-            evidence_analysis = "Supplied evidence consists primarily of anecdotal founder testimonials without randomized, double-blind, or sham-controlled clinical datasets. Scientific claims regarding acoustic brainwave entrainment through sleep textiles remain unbacked by empirical polysomnography data."
-        elif "ebpf" in prompt_lower or "tracing" in prompt_lower:
+            evidence_analysis = f"Supplied evidence is thin (count={ev_count}), consisting of preliminary or anecdotal testimonials without controlled benchmark datasets, customer retention cohorts, or statistical validation."
+        elif has_benchmark or (has_metric and has_interview) or has_pilot:
             evidence_status = "sufficient"
-            evidence_analysis = "Supplied evidence provides concrete benchmark data on agent CPU overhead (< 2%) and qualitative interview findings from 12 prospective DevOps leads. Key remaining unknown is enterprise willingness to deploy privileged daemonsets in locked-down production."
+            evidence_analysis = f"Supplied evidence provides concrete preliminary empirical backing across {ev_count} distinct items (including empirical benchmarks, customer interviews, or pilot metrics). Core remaining unknowns involve long-term production scaling and enterprise compliance approvals."
         else:
             evidence_status = "thin"
-            evidence_analysis = "Evidence provided offers early qualitative signals but lacks quantitative retention cohorts or unit-economic proof at operational scale."
+            evidence_analysis = f"Supplied evidence ({ev_count} item(s)) provides early directional signal but lacks comprehensive quantitative proof across production scale and customer retention cohorts."
 
         priorities = [
             "Validate critical technical feasibility / compliance bottlenecks before expanding marketing spend.",
@@ -519,4 +567,3 @@ class DeterministicMockAdapter(BaseAIAdapter):
             "failure_impact_analysis": failure_impact,
             "disclaimer": "Decision support only. Not an investment recommendation. Consensus among AI agents does not constitute proof of market demand."
         }
-

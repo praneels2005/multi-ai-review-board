@@ -12,8 +12,6 @@ import {
   RefreshCw,
   Plus,
   Trash2,
-  ChevronDown,
-  ChevronUp,
   AlertOctagon,
   Layers,
   Activity,
@@ -21,10 +19,12 @@ import {
   X,
   Play,
   HelpCircle,
-  ExternalLink,
   Sliders,
   DollarSign,
-  Cpu
+  Cpu,
+  Radio,
+  Check,
+  GitBranch
 } from 'lucide-react';
 
 /* ================= TYPES ================= */
@@ -90,8 +90,11 @@ interface SpecialistFeedback {
 interface ChallengeResponseItem {
   challenger_id: string;
   challenger_role: string;
+  challenger_provider?: string;
   target_specialist_id: string;
   target_role: string;
+  target_provider?: string;
+  target_model?: string;
   challenge_point: string;
   response: string;
   reasoning_adjustment: string;
@@ -111,6 +114,8 @@ interface CoordinatorCombinedReview {
   evidence_sufficiency: EvidenceSufficiencyAssessment;
   failure_impact_analysis?: string | null;
   disclaimer: string;
+  is_fallback?: boolean;
+  status?: 'success' | 'failed' | 'timed_out';
   latency_ms: number;
   token_usage: {
     input_tokens: number;
@@ -136,7 +141,10 @@ interface ReviewBoardSession {
   specialist_reviews: SpecialistFeedback[];
   challenge_round: ChallengeResponseItem[];
   combined_review?: CoordinatorCombinedReview | null;
-  status: 'draft' | 'panel_generated' | 'in_progress' | 'completed' | 'partial_failure' | 'budget_stopped';
+  status: 'draft' | 'panel_generated' | 'in_progress' | 'completed' | 'partial_failure' | 'failed' | 'budget_stopped';
+  rerun_of_session_id?: string | null;
+  version?: number;
+  rerun_history?: string[];
   execution_summary: {
     total_latency_ms: number;
     total_tokens: number;
@@ -152,6 +160,8 @@ interface SessionSummary {
   created_at: string;
   title: string;
   status: string;
+  version?: number;
+  rerun_of_session_id?: string | null;
   specialist_count: number;
   failures_encountered: number;
   total_cost_usd: number;
@@ -164,6 +174,7 @@ export default function App() {
   // State
   const [presets, setPresets] = useState<Record<string, { name: string; description: string; idea: StartupIdeaInput }>>({});
   const [selectedPresetKey, setSelectedPresetKey] = useState<string>('devtool_ebpf');
+  const [panelGenProvider, setPanelGenProvider] = useState<'mock' | 'openai' | 'gemini'>('mock');
   
   const [idea, setIdea] = useState<StartupIdeaInput>({
     title: '',
@@ -186,6 +197,11 @@ export default function App() {
   const [isGeneratingPanel, setIsGeneratingPanel] = useState(false);
   const [isRunningReview, setIsRunningReview] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Live Real-Time Agent Progress Tracking
+  const [currentPhase, setCurrentPhase] = useState<'idle' | 'specialists' | 'debate' | 'coordinator'>('idle');
+  const [activeSpecialistId, setActiveSpecialistId] = useState<string | null>(null);
+  const [liveAgentStatus, setLiveAgentStatus] = useState<Record<string, { status: string; latency_ms?: number }>>({});
 
   // History Drawer State
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -232,6 +248,8 @@ export default function App() {
     setPanel([]);
     setCurrentSession(null);
     setErrorMessage(null);
+    setLiveAgentStatus({});
+    setCurrentPhase('idle');
   };
 
   // Generate Panel
@@ -246,7 +264,10 @@ export default function App() {
       const res = await fetch(`${API_BASE}/api/review-board/generate-panel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea })
+        body: JSON.stringify({
+          idea,
+          provider: panelGenProvider
+        })
       });
       if (!res.ok) {
         const err = await res.json();
@@ -254,6 +275,7 @@ export default function App() {
       }
       const data: SpecialistAgentConfig[] = await res.json();
       setPanel(data);
+      setLiveAgentStatus({});
       setActiveTab('board');
     } catch (err: any) {
       setErrorMessage(err.message);
@@ -262,16 +284,26 @@ export default function App() {
     }
   };
 
-  // Run Review Board
+  // Run Review Board with Real-Time Event Streaming
   const handleRunReview = async () => {
-    if (panel.length === 0) {
-      setErrorMessage('Generate a panel first before running the review board.');
+    if (panel.length < 3 || panel.length > 5) {
+      setErrorMessage(`Panel must contain between 3 and 5 specialists (currently ${panel.length}).`);
       return;
     }
+
+    const uniqueIds = new Set(panel.map(s => s.id));
+    if (uniqueIds.size !== panel.length) {
+      setErrorMessage('Specialist IDs must be unique across the panel.');
+      return;
+    }
+
     setIsRunningReview(true);
     setErrorMessage(null);
+    setCurrentPhase('specialists');
+    setLiveAgentStatus({});
+
     try {
-      const res = await fetch(`${API_BASE}/api/review-board/run`, {
+      const res = await fetch(`${API_BASE}/api/review-board/run-stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -280,18 +312,88 @@ export default function App() {
           budget_config: budget
         })
       });
+
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.detail || 'Review execution failed');
       }
-      const sessionData: ReviewBoardSession = await res.json();
-      setCurrentSession(sessionData);
+
+      // Stream SSE events from response
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6));
+                handleStreamEvent(event);
+              } catch (e) {
+                // ignore keepalive/malformed
+              }
+            }
+          }
+        }
+      }
+
       fetchSavedSessions();
-      setActiveTab('combined');
     } catch (err: any) {
-      setErrorMessage(err.message);
+      // Fallback to standard POST /run if streaming fails
+      console.warn('SSE stream failed or interrupted, falling back to synchronous /run', err);
+      try {
+        const fallbackRes = await fetch(`${API_BASE}/api/review-board/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idea,
+            panel,
+            budget_config: budget
+          })
+        });
+        if (!fallbackRes.ok) {
+          const errData = await fallbackRes.json();
+          throw new Error(errData.detail || 'Fallback execution failed');
+        }
+        const sessionData: ReviewBoardSession = await fallbackRes.json();
+        setCurrentSession(sessionData);
+        fetchSavedSessions();
+        setActiveTab('combined');
+      } catch (fbErr: any) {
+        setErrorMessage(fbErr.message);
+      }
     } finally {
       setIsRunningReview(false);
+      setCurrentPhase('idle');
+      setActiveSpecialistId(null);
+    }
+  };
+
+  const handleStreamEvent = (event: any) => {
+    if (event.type === 'phase_started') {
+      setCurrentPhase(event.phase);
+    } else if (event.type === 'specialist_started') {
+      setActiveSpecialistId(event.specialist_id);
+      setLiveAgentStatus(prev => ({
+        ...prev,
+        [event.specialist_id]: { status: 'running' }
+      }));
+    } else if (event.type === 'specialist_completed') {
+      setActiveSpecialistId(null);
+      setLiveAgentStatus(prev => ({
+        ...prev,
+        [event.specialist_id]: { status: event.status, latency_ms: event.latency_ms }
+      }));
+    } else if (event.type === 'session_final') {
+      setCurrentSession(event.session);
+      setActiveTab('combined');
     }
   };
 
@@ -312,7 +414,7 @@ export default function App() {
     }
   };
 
-  // Rerun current session
+  // Rerun current session with history preservation
   const handleRerunSession = async () => {
     if (!currentSession) return;
     setIsRunningReview(true);
@@ -363,6 +465,10 @@ export default function App() {
   };
 
   const addCustomSpecialist = () => {
+    if (panel.length >= 5) {
+      setErrorMessage('Panel maximum is 5 specialists.');
+      return;
+    }
     const newSpec: SpecialistAgentConfig = {
       id: `spec_${panel.length + 1}`,
       role: 'Custom Domain Specialist',
@@ -389,10 +495,10 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-bold tracking-tight text-white">Multiple AI Review Board</h1>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-medium">
-                  v1.0.0
+                  v1.1.0
                 </span>
               </div>
-              <p className="text-xs text-slate-400">Autonomous multi-agent panel debate, independent evaluation & coordinator synthesis</p>
+              <p className="text-xs text-slate-400">Multi-agent startup evaluation with cross-provider debates & evidence grounding</p>
             </div>
           </div>
 
@@ -402,7 +508,7 @@ export default function App() {
               className="flex items-center gap-2 text-xs bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/80 text-slate-300 px-3 py-2 rounded-lg transition"
             >
               <Sliders className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Budget & Reliability</span>
+              <span>Budget & Caps</span>
             </button>
 
             <button
@@ -436,7 +542,7 @@ export default function App() {
         <div className="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Walkthrough Presets:</span>
-            <p className="text-xs text-slate-400">Select contrasting ideas to demonstrate domain-tailored panels and evidence tests</p>
+            <p className="text-xs text-slate-400">Select contrasting ideas to demonstrate domain-tailored panels, evidence tests, and debate rounds</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(presets).map(([key, item]) => (
@@ -450,12 +556,45 @@ export default function App() {
                 }`}
               >
                 <div className="font-semibold">{item.name.split(':')[1]?.trim() || item.name}</div>
-                <div className="text-[10px] text-slate-400 font-normal">{key === 'thin_evidence_neuro' ? '⚠️ Thin Evidence Test' : 'Contrasting Domain'}</div>
+                <div className="text-[10px] text-slate-400 font-normal">
+                  {key === 'thin_evidence_neuro' ? '⚠️ Thin Evidence Test' : 'Contrasting Domain'}
+                </div>
               </button>
             ))}
           </div>
         </div>
       </div>
+
+      {/* ── LIVE PIPELINE STEPPER (visible when running) ── */}
+      {isRunningReview && (
+        <div className="max-w-7xl mx-auto px-6 pt-4">
+          <div className="bg-indigo-950/30 border border-indigo-500/30 rounded-2xl p-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center animate-spin">
+                <RefreshCw className="w-4 h-4 text-indigo-300" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-2">
+                  <span>Executing Review Board</span>
+                  <span className="bg-indigo-500/20 text-indigo-300 font-mono text-[10px] px-2 py-0.5 rounded-full uppercase">
+                    Phase: {currentPhase}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  {currentPhase === 'specialists' && activeSpecialistId && (
+                    <span>Evaluating specialist <strong className="text-indigo-300">{activeSpecialistId}</strong> independently...</span>
+                  )}
+                  {currentPhase === 'debate' && <span>Conducting cross-agent debate round between specialists...</span>}
+                  {currentPhase === 'coordinator' && <span>Synthesizing decision support report and assessing evidence sufficiency...</span>}
+                </div>
+              </div>
+            </div>
+            <div className="text-xs font-mono text-indigo-400 animate-pulse">
+              ● Live Multi-Agent Streaming
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── MAIN WORKSPACE ── */}
       <main className="max-w-7xl mx-auto px-6 pt-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
@@ -466,7 +605,7 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
               <div className="flex items-center gap-2">
                 <FileText className="w-4 h-4 text-indigo-400" />
-                <h2 className="font-semibold text-sm text-slate-100">1. Startup Idea & Context</h2>
+                <h2 className="font-semibold text-sm text-slate-100">1. Startup Idea & Evidence Context</h2>
               </div>
               <span className="text-[11px] text-slate-400 font-mono">ID: {selectedPresetKey}</span>
             </div>
@@ -533,7 +672,7 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-semibold text-slate-300">Supplied Evidence Items</h3>
-                  <p className="text-[11px] text-slate-400">Specialists cite these verified IDs (e.g. E1, E2)</p>
+                  <p className="text-[11px] text-slate-400">Specialists and coordinator verify these specific IDs (E1, E2)</p>
                 </div>
                 <button
                   type="button"
@@ -547,7 +686,7 @@ export default function App() {
               {idea.evidence.length === 0 ? (
                 <div className="bg-amber-950/20 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300/80 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>No empirical evidence supplied. Review board will evaluate as unbacked claims.</span>
+                  <span>No empirical evidence supplied. Review board will evaluate as unbacked claims (insufficient evidence).</span>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -558,9 +697,22 @@ export default function App() {
                           <span className="font-mono font-bold bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-500/30">
                             {item.id}
                           </span>
-                          <span className="text-[10px] uppercase font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
-                            {item.data_type}
-                          </span>
+                          <select
+                            value={item.data_type}
+                            onChange={(e) => {
+                              const ev = [...idea.evidence];
+                              ev[idx].data_type = e.target.value as any;
+                              setIdea({ ...idea, evidence: ev });
+                            }}
+                            className="text-[10px] bg-slate-800 text-slate-300 rounded px-1.5 py-0.5 border border-slate-700"
+                          >
+                            <option value="benchmark">Benchmark</option>
+                            <option value="customer_interview">Customer Interview</option>
+                            <option value="metric">Quantitative Metric</option>
+                            <option value="pilot">Pilot Cohort</option>
+                            <option value="anecdote">Anecdote / Testimonial</option>
+                            <option value="market_report">Market Report</option>
+                          </select>
                         </div>
                         <button onClick={() => removeEvidenceItem(idx)} className="text-slate-400 hover:text-red-400 transition">
                           <Trash2 className="w-3.5 h-3.5" />
@@ -585,13 +737,27 @@ export default function App() {
                           ev[idx].summary = e.target.value;
                           setIdea({ ...idea, evidence: ev });
                         }}
-                        placeholder="Key metric or takeaway"
+                        placeholder="Key metric or empirical takeaway"
                         className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 focus:outline-none resize-none"
                       />
                     </div>
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* Panel Generation Provider Options */}
+            <div className="border-t border-slate-800/80 pt-3 flex items-center justify-between">
+              <span className="text-[11px] text-slate-400">Generator Model:</span>
+              <select
+                value={panelGenProvider}
+                onChange={(e) => setPanelGenProvider(e.target.value as any)}
+                className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-xs text-slate-300"
+              >
+                <option value="mock">Deterministic Mock</option>
+                <option value="openai">OpenAI (gpt-4o-mini)</option>
+                <option value="gemini">Google Gemini (1.5-flash)</option>
+              </select>
             </div>
 
             <button
@@ -619,14 +785,16 @@ export default function App() {
               <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
                 <div className="flex items-center gap-2">
                   <Layers className="w-4 h-4 text-violet-400" />
-                  <h2 className="font-semibold text-sm text-slate-100">2. Review Board Panel ({panel.length})</h2>
+                  <h2 className="font-semibold text-sm text-slate-100">2. Review Board Panel ({panel.length}/5)</h2>
                 </div>
-                <button
-                  onClick={addCustomSpecialist}
-                  className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 bg-violet-500/10 px-2 py-1 rounded-md border border-violet-500/20 transition"
-                >
-                  <Plus className="w-3 h-3" /> Add Specialist
-                </button>
+                {panel.length < 5 && (
+                  <button
+                    onClick={addCustomSpecialist}
+                    className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 bg-violet-500/10 px-2 py-1 rounded-md border border-violet-500/20 transition"
+                  >
+                    <Plus className="w-3 h-3" /> Add Specialist
+                  </button>
+                )}
               </div>
 
               <p className="text-xs text-slate-400">
@@ -634,95 +802,123 @@ export default function App() {
               </p>
 
               <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
-                {panel.map((spec, idx) => (
-                  <div key={spec.id} className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 text-xs space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-indigo-400 font-bold">{spec.id}</span>
-                      <button onClick={() => removeSpecialist(idx)} className="text-slate-400 hover:text-red-400">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    <input
-                      type="text"
-                      value={spec.role}
-                      onChange={(e) => updateSpecialist(idx, 'role', e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 font-semibold text-slate-200 text-xs"
-                      placeholder="Specialist Role Title"
-                    />
-
-                    <div>
-                      <span className="text-[10px] text-slate-400 font-medium">Review Mandate:</span>
-                      <textarea
-                        rows={2}
-                        value={spec.mandate}
-                        onChange={(e) => updateSpecialist(idx, 'mandate', e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 resize-none mt-0.5"
-                      />
-                    </div>
-
-                    {/* Provider & Model Selector */}
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <div>
-                        <label className="text-[10px] text-slate-400">AI Provider</label>
-                        <select
-                          value={spec.provider}
-                          onChange={(e) => {
-                            const p = e.target.value as any;
-                            let defaultModel = 'mock-deterministic';
-                            if (p === 'openai') defaultModel = 'gpt-4o-mini';
-                            if (p === 'gemini') defaultModel = 'gemini-1.5-flash';
-                            updateSpecialist(idx, 'provider', p);
-                            updateSpecialist(idx, 'model', defaultModel);
-                          }}
-                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
-                        >
-                          <option value="mock">Deterministic Mock (No Key)</option>
-                          <option value="openai">OpenAI (AsyncOpenAI)</option>
-                          <option value="gemini">Google Gemini (GenAI SDK)</option>
-                        </select>
+                {panel.map((spec, idx) => {
+                  const live = liveAgentStatus[spec.id];
+                  return (
+                    <div
+                      key={spec.id}
+                      className={`bg-slate-900/90 border rounded-xl p-3 text-xs space-y-2 transition ${
+                        live?.status === 'running'
+                          ? 'border-indigo-500 ring-1 ring-indigo-500/50 shadow-lg shadow-indigo-500/20'
+                          : live?.status === 'success'
+                          ? 'border-emerald-500/40'
+                          : live?.status === 'failed' || live?.status === 'timed_out'
+                          ? 'border-red-500/40'
+                          : 'border-slate-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-indigo-400 font-bold">{spec.id}</span>
+                          {live?.status === 'running' && (
+                            <span className="flex items-center gap-1 text-[10px] text-indigo-300 bg-indigo-500/20 px-1.5 py-0.2 rounded font-mono animate-pulse">
+                              <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Running
+                            </span>
+                          )}
+                          {live?.status === 'success' && (
+                            <span className="text-[10px] text-emerald-300 bg-emerald-500/20 px-1.5 py-0.2 rounded font-mono">
+                              ✓ Done ({live.latency_ms?.toFixed(0)}ms)
+                            </span>
+                          )}
+                        </div>
+                        {panel.length > 3 && (
+                          <button onClick={() => removeSpecialist(idx)} className="text-slate-400 hover:text-red-400">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
 
+                      <input
+                        type="text"
+                        value={spec.role}
+                        onChange={(e) => updateSpecialist(idx, 'role', e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 font-semibold text-slate-200 text-xs"
+                        placeholder="Specialist Role Title"
+                      />
+
                       <div>
-                        <label className="text-[10px] text-slate-400">Model</label>
-                        <input
-                          type="text"
-                          value={spec.model}
-                          onChange={(e) => updateSpecialist(idx, 'model', e.target.value)}
-                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
+                        <span className="text-[10px] text-slate-400 font-medium">Review Mandate:</span>
+                        <textarea
+                          rows={2}
+                          value={spec.mandate}
+                          onChange={(e) => updateSpecialist(idx, 'mandate', e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 resize-none mt-0.5"
                         />
                       </div>
-                    </div>
 
-                    {/* Failure Simulation Dropdown (for testing and demo) */}
-                    <div className="bg-slate-950/60 p-2 rounded border border-slate-800/60 mt-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-slate-400">Simulate Failure (Demo Resilience):</span>
-                        <select
-                          value={spec.simulate_failure || ''}
-                          onChange={(e) => updateSpecialist(idx, 'simulate_failure', e.target.value || null)}
-                          className="bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-[10px] text-amber-300"
-                        >
-                          <option value="">None (Normal)</option>
-                          <option value="timeout">Simulate Timeout</option>
-                          <option value="provider_error">Simulate Connection Error</option>
-                          <option value="malformed_output">Simulate Malformed JSON</option>
-                        </select>
+                      {/* Provider & Model Selector */}
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <div>
+                          <label className="text-[10px] text-slate-400">AI Provider</label>
+                          <select
+                            value={spec.provider}
+                            onChange={(e) => {
+                              const p = e.target.value as any;
+                              let defaultModel = 'mock-deterministic';
+                              if (p === 'openai') defaultModel = 'gpt-4o-mini';
+                              if (p === 'gemini') defaultModel = 'gemini-1.5-flash';
+                              updateSpecialist(idx, 'provider', p);
+                              updateSpecialist(idx, 'model', defaultModel);
+                            }}
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
+                          >
+                            <option value="mock">Deterministic Mock</option>
+                            <option value="openai">OpenAI (AsyncOpenAI)</option>
+                            <option value="gemini">Google Gemini (GenAI SDK)</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] text-slate-400">Model</label>
+                          <input
+                            type="text"
+                            value={spec.model}
+                            onChange={(e) => updateSpecialist(idx, 'model', e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Failure Simulation Dropdown */}
+                      <div className="bg-slate-950/60 p-2 rounded border border-slate-800/60 mt-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-slate-400">Simulate Failure (Demo Resilience):</span>
+                          <select
+                            value={spec.simulate_failure || ''}
+                            onChange={(e) => updateSpecialist(idx, 'simulate_failure', e.target.value || null)}
+                            className="bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-[10px] text-amber-300"
+                          >
+                            <option value="">None (Normal)</option>
+                            <option value="timeout">Simulate Timeout</option>
+                            <option value="provider_error">Simulate Connection Error</option>
+                            <option value="malformed_output">Simulate Malformed JSON</option>
+                          </select>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <button
                 onClick={handleRunReview}
-                disabled={isRunningReview || panel.length === 0}
+                disabled={isRunningReview || panel.length < 3 || panel.length > 5}
                 className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20 disabled:opacity-50 transition"
               >
                 {isRunningReview ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    Executing Multi-Agent Review Board...
+                    Executing Live Review Board...
                   </>
                 ) : (
                   <>
@@ -772,7 +968,7 @@ export default function App() {
               }`}
             >
               <Activity className="w-3.5 h-3.5" />
-              Debate Transcript ({currentSession?.challenge_round?.length || 0})
+              Cross-Agent Debate ({currentSession?.challenge_round?.length || 0})
             </button>
           </div>
 
@@ -783,10 +979,16 @@ export default function App() {
                 <span className={`px-2 py-0.5 rounded font-mono font-bold uppercase text-[10px] ${
                   currentSession.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
                   currentSession.status === 'partial_failure' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+                  currentSession.status === 'budget_stopped' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' :
                   'bg-red-500/20 text-red-300 border border-red-500/30'
                 }`}>
                   Status: {currentSession.status}
                 </span>
+                {currentSession.version && currentSession.version > 1 && (
+                  <span className="flex items-center gap-1 font-mono text-[10px] text-violet-400 bg-violet-500/10 px-1.5 py-0.5 rounded border border-violet-500/20">
+                    <GitBranch className="w-3 h-3" /> v{currentSession.version}
+                  </span>
+                )}
                 <span className="text-slate-400">Calls: {currentSession.execution_summary.calls_made}</span>
               </div>
 
@@ -810,7 +1012,7 @@ export default function App() {
                 disabled={isRunningReview}
                 className="flex items-center gap-1 text-[11px] text-indigo-300 hover:text-white bg-indigo-500/20 hover:bg-indigo-500/30 px-2.5 py-1 rounded-lg border border-indigo-500/30 transition"
               >
-                <RefreshCw className="w-3 h-3" /> Rerun Review
+                <RefreshCw className="w-3 h-3" /> Rerun Review (Saves v{ (currentSession.version || 1) + 1 })
               </button>
             </div>
           )}
@@ -828,6 +1030,20 @@ export default function App() {
                 </div>
               ) : (
                 <>
+                  {/* Coordinator Fallback Alert Banner (if coordinator failed) */}
+                  {currentSession.combined_review.is_fallback && (
+                    <div className="bg-red-950/40 border border-red-500/50 rounded-2xl p-4 text-xs text-red-200 flex items-start gap-3 shadow-xl">
+                      <AlertOctagon className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="text-red-300 font-bold block text-sm">Coordinator Synthesis Failed (Fallback Guidance Only)</strong>
+                        <p className="opacity-90 mt-1">
+                          The coordinator model encountered an upstream timeout or failure ({currentSession.combined_review.status}).
+                          The assessment below is fallback advisory text; review the individual specialist feedback cards for verified domain opinions.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Coordinator Executive Summary */}
                   <div className="bg-[#0f0f1d] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
                     <div className="flex items-center justify-between">
@@ -836,7 +1052,7 @@ export default function App() {
                         <h2 className="font-bold text-base text-white">Coordinator Combined Review</h2>
                       </div>
                       <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/20">
-                        Independent Synthesis
+                        Independent Coordinator
                       </span>
                     </div>
 
@@ -855,7 +1071,7 @@ export default function App() {
                       <div className="flex items-center gap-2 mb-1.5">
                         <Shield className="w-4 h-4 shrink-0" />
                         <span className="font-bold text-xs uppercase tracking-wide">
-                          Evidence Sufficiency: {currentSession.combined_review.evidence_sufficiency.status}
+                          Evidence Grounding: {currentSession.combined_review.evidence_sufficiency.status}
                         </span>
                       </div>
                       <p className="text-xs opacity-90 leading-relaxed">
@@ -1100,42 +1316,55 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 3: BOUNDED DEBATE TRANSCRIPT */}
+          {/* TAB 3: CROSS-AGENT DEBATE TRANSCRIPT */}
           {activeTab === 'debate' && (
             <div className="space-y-4">
               {!currentSession?.challenge_round?.length ? (
                 <div className="bg-[#0f0f1d] border border-slate-800 rounded-2xl p-10 text-center space-y-3">
                   <Activity className="w-10 h-10 text-slate-400 mx-auto" />
                   <h3 className="text-base font-semibold text-slate-300">No Debate Rounds Yet</h3>
-                  <p className="text-xs text-slate-400">Run the review board to observe the 1 bounded challenge and response debate round.</p>
+                  <p className="text-xs text-slate-400">Run the review board to observe the genuine 2-step cross-agent exchange.</p>
                 </div>
               ) : (
                 currentSession.challenge_round.map((item, idx) => (
                   <div key={idx} className="bg-[#0f0f1d] border border-slate-800/90 rounded-2xl p-6 shadow-xl space-y-4">
                     <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                      <span className="font-mono text-xs font-bold text-violet-400">Debate Round #{idx + 1}</span>
-                      <span className="text-[10px] bg-violet-500/10 text-violet-300 px-2 py-0.5 rounded font-mono">
-                        Bounded Challenge
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-bold text-violet-400">Debate Round #{idx + 1}</span>
+                        <span className="text-[10px] bg-violet-500/10 text-violet-300 px-2 py-0.5 rounded font-mono">
+                          2-Step Independent Exchange
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-mono">
+                          Challenger ({item.challenger_provider || 'mock'}) → Target ({item.target_provider || 'mock'})
+                        </span>
+                      </div>
                     </div>
 
                     <div className="space-y-3 text-xs">
-                      {/* Challenge */}
+                      {/* Step 1: Challenger */}
                       <div className="bg-red-950/20 border border-red-500/30 p-3.5 rounded-xl space-y-1">
-                        <div className="flex items-center gap-1.5 text-red-300 font-bold">
-                          <AlertTriangle className="w-4 h-4" />
-                          <span>{item.challenger_role} challenges {item.target_role}:</span>
+                        <div className="flex items-center justify-between text-red-300 font-bold">
+                          <div className="flex items-center gap-1.5">
+                            <AlertTriangle className="w-4 h-4" />
+                            <span>Step 1: {item.challenger_role} challenges {item.target_role}:</span>
+                          </div>
+                          <span className="text-[10px] font-mono text-red-400">{item.challenger_provider || 'mock'}</span>
                         </div>
                         <p className="text-slate-200 leading-relaxed pl-5">
                           &ldquo;{item.challenge_point}&rdquo;
                         </p>
                       </div>
 
-                      {/* Response */}
+                      {/* Step 2: Target Response */}
                       <div className="bg-indigo-950/20 border border-indigo-500/30 p-3.5 rounded-xl space-y-1">
-                        <div className="flex items-center gap-1.5 text-indigo-300 font-bold">
-                          <ArrowRight className="w-4 h-4" />
-                          <span>{item.target_role}&apos;s Defense:</span>
+                        <div className="flex items-center justify-between text-indigo-300 font-bold">
+                          <div className="flex items-center gap-1.5">
+                            <ArrowRight className="w-4 h-4" />
+                            <span>Step 2: {item.target_role}&apos;s Independent Defense:</span>
+                          </div>
+                          <span className="text-[10px] font-mono text-indigo-400">{item.target_provider || 'mock'}</span>
                         </div>
                         <p className="text-slate-200 leading-relaxed pl-5">
                           &ldquo;{item.response}&rdquo;
@@ -1186,14 +1415,21 @@ export default function App() {
                     >
                       <div className="flex items-center justify-between">
                         <span className="font-semibold text-slate-200 truncate max-w-[200px]">{s.title}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                          s.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
-                        }`}>
-                          {s.status}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {s.version && s.version > 1 && (
+                            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1 py-0.2 rounded font-mono">
+                              v{s.version}
+                            </span>
+                          )}
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                            s.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
+                          }`}>
+                            {s.status}
+                          </span>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-400">
-                        <span>{s.specialist_count} specialists</span>
+                        <span>{s.specialist_count} specialists • {s.evidence_status}</span>
                         <span>{new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                       </div>
                     </div>
@@ -1228,7 +1464,7 @@ export default function App() {
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="block text-slate-400 mb-1">Call Cap (Hard Stop)</label>
+                <label className="block text-slate-400 mb-1">Call Cap (Hard Stop on all invocations)</label>
                 <input
                   type="number"
                   min={1}
@@ -1237,7 +1473,7 @@ export default function App() {
                   onChange={(e) => setBudget({ ...budget, call_cap: parseInt(e.target.value) || 20 })}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-3 py-2 text-slate-100"
                 />
-                <span className="text-[10px] text-slate-400">Execution halts immediately if total calls reach this cap.</span>
+                <span className="text-[10px] text-slate-400">Checked atomically before every call, including retries & debate steps.</span>
               </div>
 
               <div>
@@ -1251,7 +1487,7 @@ export default function App() {
                   onChange={(e) => setBudget({ ...budget, token_cap: parseInt(e.target.value) || 50000 })}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-3 py-2 text-slate-100"
                 />
-                <span className="text-[10px] text-slate-400">Halts execution if total tokens exceed this limit.</span>
+                <span className="text-[10px] text-slate-400">Reserves estimated tokens prior to request execution.</span>
               </div>
 
               <div>

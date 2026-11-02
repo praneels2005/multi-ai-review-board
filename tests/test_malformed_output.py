@@ -44,7 +44,7 @@ async def test_orchestrator_handles_malformed_specialist_output():
     panel = [
         SpecialistAgentConfig(
             id="spec_1",
-            role="Normal Specialist",
+            role="Normal Specialist 1",
             expertise="General expertise",
             mandate="Review",
             rationale="Needed",
@@ -60,19 +60,31 @@ async def test_orchestrator_handles_malformed_specialist_output():
             provider="mock",
             model="mock-deterministic",
             simulate_failure="malformed_output"
+        ),
+        SpecialistAgentConfig(
+            id="spec_3",
+            role="Normal Specialist 2",
+            expertise="Security expertise",
+            mandate="Security review",
+            rationale="Verification",
+            provider="mock",
+            model="mock-deterministic"
         )
     ]
 
     orchestrator = ReviewBoardOrchestrator(budget_config=BudgetConfig(max_retries=0))
     session = await orchestrator.execute_board(idea=idea, panel=panel)
 
-    assert len(session.specialist_reviews) == 2
+    assert len(session.specialist_reviews) == 3
     spec1_review = session.specialist_reviews[0]
     spec2_review = session.specialist_reviews[1]
+    spec3_review = session.specialist_reviews[2]
 
     assert spec1_review.status == "success"
     assert spec2_review.status == "failed"
+    assert spec3_review.status == "success"
     assert "Malformed" in (spec2_review.error_message or "") or "Failed to parse" in (spec2_review.error_message or "")
+
     # Entire board still produces session with coordinator synthesis
     assert session.combined_review is not None
     assert session.status == "partial_failure"

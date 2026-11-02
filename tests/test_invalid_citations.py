@@ -14,6 +14,38 @@ from app.schemas.review_board_schema import (
 from app.services.review_orchestrator import ReviewBoardOrchestrator
 
 
+def _make_3_specialists():
+    return [
+        SpecialistAgentConfig(
+            id="spec_1",
+            role="Cloud Infrastructure & Kernel Systems Architect",
+            expertise="eBPF kernel telemetry",
+            mandate="Evaluate overhead benchmarks",
+            rationale="Crucial technical angle",
+            provider="mock",
+            model="mock-deterministic"
+        ),
+        SpecialistAgentConfig(
+            id="spec_2",
+            role="Developer Experience Specialist",
+            expertise="DevEx workflows",
+            mandate="Evaluate CLI ergonomics",
+            rationale="Essential adoption angle",
+            provider="mock",
+            model="mock-deterministic"
+        ),
+        SpecialistAgentConfig(
+            id="spec_3",
+            role="DevSecOps Auditor",
+            expertise="Host security",
+            mandate="Assess permissions",
+            rationale="Security angle",
+            provider="mock",
+            model="mock-deterministic"
+        )
+    ]
+
+
 @pytest.mark.anyio
 async def test_valid_evidence_citations_recognized():
     """Verify that supplied evidence IDs (E1, E2) are categorized as valid citations."""
@@ -29,18 +61,7 @@ async def test_valid_evidence_citations_recognized():
         ]
     )
 
-    panel = [
-        SpecialistAgentConfig(
-            id="spec_1",
-            role="Cloud Infrastructure & Kernel Systems Architect",
-            expertise="eBPF kernel telemetry",
-            mandate="Evaluate overhead benchmarks",
-            rationale="Crucial technical angle",
-            provider="mock",
-            model="mock-deterministic"
-        )
-    ]
-
+    panel = _make_3_specialists()
     orchestrator = ReviewBoardOrchestrator()
     session = await orchestrator.execute_board(idea=idea, panel=panel)
 
@@ -54,7 +75,6 @@ async def test_valid_evidence_citations_recognized():
 @pytest.mark.anyio
 async def test_invalid_citations_flagged_when_unsupplied():
     """Verify that when a review cites an ID not in the supplied evidence list, it is marked invalid."""
-    # Idea with NO evidence provided
     idea_no_evidence = StartupIdeaInput(
         title="DevPulse eBPF Tracing",
         idea="Continuous distributed tracing using eBPF probes for Kubernetes microservices.",
@@ -64,24 +84,10 @@ async def test_invalid_citations_flagged_when_unsupplied():
         evidence=[]  # Zero evidence supplied
     )
 
-    panel = [
-        SpecialistAgentConfig(
-            id="spec_1",
-            role="Cloud Infrastructure & Kernel Systems Architect",
-            expertise="eBPF kernel telemetry",
-            mandate="Evaluate overhead benchmarks",
-            rationale="Crucial technical angle",
-            provider="mock",
-            model="mock-deterministic"
-        )
-    ]
-
+    panel = _make_3_specialists()
     orchestrator = ReviewBoardOrchestrator()
     session = await orchestrator.execute_board(idea=idea_no_evidence, panel=panel)
 
-    review = session.specialist_reviews[0]
-    # If the agent cited E1 even though no evidence was supplied, E1 MUST be in invalid_citations!
-    if "E1" in (review.evidence_citations + review.invalid_citations):
-        assert "E1" in review.invalid_citations
-        assert "E1" not in review.evidence_citations
-
+    # When no evidence is supplied, no specialist should have valid citations
+    for review in session.specialist_reviews:
+        assert len(review.evidence_citations) == 0

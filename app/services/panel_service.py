@@ -82,16 +82,21 @@ Supplied Evidence:
             )
             raw_specs = (fallback_res.parsed_json or {}).get("specialists", [])
 
+        seen_ids = set()
         for idx, s in enumerate(raw_specs[:5]):
             spec_id = s.get("id") or f"spec_{idx+1}"
+            if spec_id in seen_ids:
+                spec_id = f"spec_{idx+1}"
+            seen_ids.add(spec_id)
+
             specialists.append(SpecialistAgentConfig(
                 id=spec_id,
                 role=s.get("role", f"Domain Specialist {idx+1}"),
                 expertise=s.get("expertise", "Relevant industry and technical domain expertise."),
                 mandate=s.get("mandate", "Scrutinize assumptions and identify operational failure risks."),
                 rationale=s.get("rationale", "Provides necessary specialized perspective for this business model."),
-                provider="mock",
-                model="mock-deterministic"
+                provider=s.get("provider") or provider or "mock",
+                model=s.get("model") or model or "mock-deterministic"
             ))
 
         return specialists

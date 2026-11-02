@@ -1,7 +1,7 @@
 """
 Tests for FastAPI Review Board API endpoints.
 Verifies preset loading, dynamic panel generation, running review boards,
-persisting sessions, listing history, and reopening/rerunning saved reviews.
+persisting sessions, listing history, and reopening/rerunning saved reviews with versioning.
 """
 
 import pytest
@@ -25,7 +25,6 @@ def test_get_presets_endpoint(client):
     assert "ecommerce_d2c" in data
     assert "thin_evidence_neuro" in data
 
-    # Verify preset structure
     devtool = data["devtool_ebpf"]
     assert "DevPulse" in devtool["idea"]["title"]
     assert len(devtool["idea"]["evidence"]) >= 1
@@ -41,7 +40,8 @@ def test_generate_panel_endpoint(client):
             "problem": "Unused GPU/CPU allocations waste millions in cloud budgets.",
             "proposed_solution": "Dynamic cluster scaler driven by real-time queue demand.",
             "evidence": []
-        }
+        },
+        "provider": "mock"
     }
 
     response = client.post("/api/review-board/generate-panel", json=payload)
@@ -100,13 +100,22 @@ def test_run_review_board_and_persistence(client):
     assert reopened["session_id"] == session_id
     assert reopened["idea"]["title"] == preset_data["title"]
 
-    # 6. Rerun saved session
+    # 6. Rerun saved session (generates new session linking to parent)
     rerun_res = client.post(f"/api/review-board/sessions/{session_id}/rerun")
     assert rerun_res.status_code == 200
     rerun_data = rerun_res.json()
-    assert rerun_data["session_id"] == session_id
+    new_session_id = rerun_data["session_id"]
+
+    assert new_session_id != session_id
+    assert rerun_data["rerun_of_session_id"] == session_id
+    assert rerun_data["version"] == 2
     assert rerun_data["status"] == "completed"
 
-    # Cleanup test session
-    SessionStore.delete(session_id)
+    # Verify parent links to new session
+    parent_res = client.get(f"/api/review-board/sessions/{session_id}")
+    parent_data = parent_res.json()
+    assert new_session_id in parent_data.get("rerun_history", [])
 
+    # Cleanup test sessions
+    SessionStore.delete(session_id)
+    SessionStore.delete(new_session_id)
