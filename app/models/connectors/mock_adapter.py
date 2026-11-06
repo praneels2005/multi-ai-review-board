@@ -6,9 +6,7 @@ Grounded strictly in supplied evidence (not superficial keywords).
 """
 
 import asyncio
-import hashlib
 import json
-import re
 import time
 from typing import Optional, Dict, Any
 from app.models.connectors.base_connector import AITask, BaseAIAdapter, NormalizedProviderResponse
@@ -257,142 +255,13 @@ class DeterministicMockAdapter(BaseAIAdapter):
         return specialist_feedback(user_prompt)
 
     def _generate_challenger_point(self, user_prompt: str) -> Dict[str, Any]:
-        """Generate a single sharp challenge point from the challenger specialist."""
-        prompt_lower = user_prompt.lower()
-        if "ebpf" in prompt_lower or "tracing" in prompt_lower or "kernel" in prompt_lower:
-            return {
-                "challenge_point": "Your recommendation to deploy via a 1-click developer CLI assumes engineering teams have root Kubernetes daemonset permissions (CAP_BPF / CAP_SYS_ADMIN), which enterprise security and platform teams actively prohibit in production clusters."
-            }
-        elif "cosmetic" in prompt_lower or "refill" in prompt_lower or "logistics" in prompt_lower:
-            return {
-                "challenge_point": "Your retention model assumes customer container returns cost under $1.50, but single-bottle reverse parcel postage through USPS parcel select will exceed $3.40 per bottle, wiping out gross product margin on refills."
-            }
-        elif "sleep" in prompt_lower or "brainwave" in prompt_lower or "neuro" in prompt_lower:
-            return {
-                "challenge_point": "You suggest marketing this as a general wellness sleep aid to bypass FDA Class II medical device requirements, but doing so strips away medical credibility and fails to justify a premium $299 price point without double-blind PSG clinical data."
-            }
-        else:
-            return {
-                "challenge_point": "Your customer discovery findings show strong qualitative dissatisfaction with existing tools, but dissatisfaction does not prove willingness to migrate production data or incur workflow switching costs."
-            }
+        from app.models.connectors.mock_deliberation import challenge
+        return challenge(user_prompt)
 
     def _generate_target_defense(self, user_prompt: str) -> Dict[str, Any]:
-        """Generate target specialist defense and reasoning shift in response to challenge."""
-        prompt_lower = user_prompt.lower()
-        if "cap_bpf" in prompt_lower or "daemonset" in prompt_lower or "root" in prompt_lower or "ebpf" in prompt_lower:
-            return {
-                "response": "Valid concern. Instead of running root probes from an ad-hoc developer CLI, the CLI will output standard Helm / GitOps manifests that route through platform engineering's formal review, allowing security to audit kernel probes before deployment.",
-                "reasoning_adjustment": "Adoption model adjusted: pivot from unapproved bottom-up developer installation to pre-approved platform engineering GitOps templates with RBAC controls."
-            }
-        elif "postage" in prompt_lower or "reverse" in prompt_lower or "bottle" in prompt_lower:
-            return {
-                "response": "To protect gross margin, returns should not occur on a per-bottle cadence. Customers will receive a batch-mailer and return empties in batches of 3 every 90 days, bringing per-unit return postage down to $1.15.",
-                "reasoning_adjustment": "Fulfillment schedule adjusted: moved from single-bottle return loops to 90-day batched return mailers to maintain >50% gross margin."
-            }
-        elif "fda" in prompt_lower or "wellness" in prompt_lower or "clinical" in prompt_lower:
-            return {
-                "response": "We will stage commercialization into two phases: launch initially under FTC-compliant wellness claims for cash flow, while allocating 30% of proceeds toward a formal 20-person sham-controlled EEG clinical trial for future medical certification.",
-                "reasoning_adjustment": "Go-to-market shifted to a two-phase roadmap: near-term consumer wellness positioning followed by rigorous sham-controlled clinical trial data."
-            }
-        else:
-            return {
-                "response": "Agreed that verbal intent is insufficient. We will require early pilot prospects to connect a read-only test data source during onboarding before granting free pilot access.",
-                "reasoning_adjustment": "Pilot qualification gate tightened: qualification now requires active data connection commitment rather than verbal interest."
-            }
-
-    def _generate_challenge_response(self, user_prompt: str) -> Dict[str, Any]:
-        """Legacy dual challenge generator for backward compatibility."""
-        ch = self._generate_challenger_point(user_prompt)["challenge_point"]
-        resp_data = self._generate_target_defense(ch)
-        return {
-            "challenges": [
-                {
-                    "challenger_id": "spec_2",
-                    "challenger_role": "Platform Systems Architect",
-                    "target_specialist_id": "spec_1",
-                    "target_role": "Developer Experience Specialist",
-                    "challenge_point": ch,
-                    "response": resp_data["response"],
-                    "reasoning_adjustment": resp_data["reasoning_adjustment"]
-                }
-            ]
-        }
+        from app.models.connectors.mock_deliberation import respond
+        return respond(user_prompt)
 
     def _generate_coordinator_synthesis(self, user_prompt: str) -> Dict[str, Any]:
-        """
-        Synthesize independent reviews, highlight disagreements, evaluate evidence sufficiency,
-        and note failure impact.
-        CRITICAL: Evidence sufficiency is determined STRICTLY by analyzing the supplied evidence
-        items and evidence count in the prompt, NOT by superficial idea keywords!
-        """
-        prompt_lower = user_prompt.lower()
-
-        # Check if an agent failure was reported in prompt
-        failure_detected = "failure" in prompt_lower or "failed" in prompt_lower or "timed out" in prompt_lower
-        failure_impact = None
-        if failure_detected:
-            failure_impact = "One or more specialist agents failed or timed out during the review board run. As a result, specific technical or operational perspectives could not be comprehensively evaluated. Overall confidence in those domains is degraded; founders must manually consult domain specialists before proceeding."
-
-        # Parse evidence items strictly from prompt
-        # We look for "Supplied Evidence Count: N" or evidence markers
-        evidence_count_match = re.search(r"supplied evidence count:\s*(\d+)", prompt_lower)
-        ev_count = int(evidence_count_match.group(1)) if evidence_count_match else 0
-
-        # Inspect evidence text block if present
-        has_benchmark = "(benchmark)" in prompt_lower or "data_type: benchmark" in prompt_lower
-        has_interview = "(customer_interview)" in prompt_lower or "(interview)" in prompt_lower
-        has_metric = "(metric)" in prompt_lower or "data_type: metric" in prompt_lower
-        has_pilot = "(pilot)" in prompt_lower
-        has_anecdote_only = "(anecdote)" in prompt_lower and not (has_benchmark or has_interview or has_metric or has_pilot)
-        no_evidence = ev_count == 0 or "no empirical evidence supplied" in prompt_lower or "supplied evidence items:\nnone" in prompt_lower
-
-        if no_evidence:
-            evidence_status = "insufficient"
-            evidence_analysis = "No empirical evidence was supplied. All claims regarding market demand, technical performance, and customer willingness to pay represent unverified founder assumptions requiring immediate ground-up validation."
-        elif has_anecdote_only or ev_count == 1:
-            evidence_status = "thin"
-            evidence_analysis = f"Supplied evidence is thin (count={ev_count}), consisting of preliminary or anecdotal testimonials without controlled benchmark datasets, customer retention cohorts, or statistical validation."
-        elif has_benchmark or (has_metric and has_interview) or has_pilot:
-            evidence_status = "sufficient"
-            evidence_analysis = f"Supplied evidence provides concrete preliminary empirical backing across {ev_count} distinct items (including empirical benchmarks, customer interviews, or pilot metrics). Core remaining unknowns involve long-term production scaling and enterprise compliance approvals."
-        else:
-            evidence_status = "thin"
-            evidence_analysis = f"Supplied evidence ({ev_count} item(s)) provides early directional signal but lacks comprehensive quantitative proof across production scale and customer retention cohorts."
-
-        priorities = [
-            "Validate critical technical feasibility / compliance bottlenecks before expanding marketing spend.",
-            "Run controlled, low-cost pilot experiments to replace unverified assumptions with empirical behavioral data.",
-            "Align security, regulatory, and go-to-market incentives so product onboarding does not trigger organizational friction."
-        ]
-
-        disagreements = [
-            "Tension between rapid user onboarding friction vs rigorous enterprise security and compliance guardrails.",
-            "Debate over whether customer enthusiasm in interviews translates to willingness to pay and tolerate operational changes.",
-            "Conflicting priorities between short-term unit margin preservation and long-term customer convenience."
-        ]
-
-        next_experiments = [
-            {
-                "hypothesis": "Early target adopters will complete an end-to-end integration test within 7 days when provided guided setup materials.",
-                "test_design": "Engage 10 qualified target prospects with a low-touch onboarding package and track completion rate and drop-off points.",
-                "success_metric": ">= 60% completion rate without high-touch founder intervention."
-            },
-            {
-                "hypothesis": "Unit economics remain profitable after factoring in real-world friction, returns, and support overhead.",
-                "test_design": "Run a 50-unit end-to-end batch transaction simulation accounting for every line-item expense.",
-                "success_metric": "Contribution margin remains above 40% after fully-loaded variable costs."
-            }
-        ]
-
-        return {
-            "summary": "The Review Board has completed independent evaluation and bounded cross-examination. While the core concept addresses real operational friction, significant unverified assumptions around operational friction, security/regulatory approvals, and true willingness to pay must be empirically validated before committing substantial capital.",
-            "priorities": priorities,
-            "disagreements": disagreements,
-            "next_experiments": next_experiments,
-            "evidence_sufficiency": {
-                "status": evidence_status,
-                "analysis": evidence_analysis
-            },
-            "failure_impact_analysis": failure_impact,
-            "disclaimer": "Decision support only. Not an investment recommendation. Consensus among AI agents does not constitute proof of market demand."
-        }
+        from app.models.connectors.mock_deliberation import synthesize
+        return synthesize(user_prompt)

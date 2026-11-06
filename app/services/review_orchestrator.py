@@ -28,6 +28,7 @@ from app.schemas.review_board_schema import (
     ReviewBoardSession,
 )
 from app.models.connectors.factory import get_provider_adapter
+from app.models.connectors.mock_deliberation import review_context, select_pairs
 from app.models.connectors.base_connector import AITask, NormalizedProviderResponse
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ Respond ONLY with a valid JSON object matching this schema:
 """
 
 CHALLENGER_SYSTEM_PROMPT = """You are a specialist reviewer generating a sharp, rigorous challenge against a peer specialist's review.
-Identify one sharp point of disagreement, conflicting operational priorities, or contested assumption in the peer specialist's evaluation.
+Use the actual challenger and target findings. Identify a supported disagreement, competing objective, or complementary risk; do not invent a position or force disagreement.
 Focus directly on domain trade-offs (e.g. speed vs security, unit margin vs customer convenience, wellness claims vs medical rigor).
 
 Respond ONLY with a valid JSON object matching this schema:
@@ -100,10 +101,10 @@ Mandates:
 1. Summarize top priorities and strategic imperatives.
 2. Highlight key disagreements, conflicting tradeoffs, and tensions between specialists.
 3. Prioritize next validation experiments with high learning value and low execution cost.
-4. Critically assess evidence sufficiency: Determine sufficiency STRICTLY from the supplied evidence items and evidence count.
-   - If count is 0: mark 'insufficient' and note lack of empirical proof.
-   - If only anecdotes / founder diaries: mark 'thin'.
-   - If empirical benchmarks/interviews/metrics provided: mark 'sufficient' and specify what they cover.
+4. Assess evidence relevance, methods, limitations, contradictions and unresolved assumptions.
+   - Without evidence mark 'insufficient'. Anecdotes remain 'thin' and cannot establish clinical efficacy.
+   - Evidence counts and source/type labels alone never justify 'sufficient'.
+   - Preserve proposed experiments, including their procedures and success metrics; do not invent results.
 5. If any specialist failed during the run, explicitly analyze how the missing perspective affects confidence.
 6. Clearly state: This is decision support, not an investment recommendation. Do NOT treat consensus as proof of demand.
 
@@ -484,9 +485,7 @@ class ReviewBoardOrchestrator:
         challenge_items: List[ChallengeResponseItem] = []
 
         # Form 1 or 2 debate pairs (bounded to 1 round)
-        pairs = [(feedbacks[1], feedbacks[0])]
-        if len(feedbacks) >= 4:
-            pairs.append((feedbacks[3], feedbacks[2]))
+        pairs = select_pairs(feedbacks, panel_map)
 
         for challenger_fb, target_fb in pairs:
             if self.budget_stopped:
@@ -499,15 +498,12 @@ class ReviewBoardOrchestrator:
 
             # --- STEP A: Challenger generates challenge using Challenger's Adapter ---
             challenger_adapter = get_provider_adapter(challenger_spec.provider)
-            step_a_user_prompt = f"""Startup Idea: '{idea.title}'
-You are: {challenger_spec.role} ({challenger_spec.expertise})
-Your Task: Review the following assessment by peer specialist {target_spec.role}:
-Peer Strengths: {'; '.join(target_fb.strengths[:2])}
-Peer Risks: {'; '.join(target_fb.risks[:2])}
-Peer Missing Assumptions: {'; '.join(target_fb.missing_assumptions[:2])}
-
-Generate a sharp challenge questioning a critical assumption or conflicting trade-off in {target_spec.role}'s reasoning.
-"""
+            exchange_context = {
+                "idea": idea.model_dump(),
+                "challenger": review_context(challenger_fb, challenger_spec),
+                "target": review_context(target_fb, target_spec),
+            }
+            step_a_user_prompt = json.dumps(exchange_context, ensure_ascii=False)
             challenger_res = await self._safe_provider_call(
                 adapter=challenger_adapter,
                 task="challenge_generation",
@@ -519,20 +515,12 @@ Generate a sharp challenge questioning a critical assumption or conflicting trad
 
             challenger_parsed = challenger_res.parsed_json or {}
             challenge_point = challenger_parsed.get("challenge_point") or challenger_parsed.get("challenge")
-            if not challenge_point:
-                challenge_point = f"{challenger_spec.role} challenges whether {target_spec.role}'s assumptions on operational overhead and friction are defensible in production."
+            if challenger_res.error or not challenge_point:
+                raise ValueError(challenger_res.error or "Challenger returned no grounded challenge")
 
             # --- STEP B: Target Specialist responds using Target's Assigned Adapter ---
             target_adapter = get_provider_adapter(target_spec.provider)
-            step_b_user_prompt = f"""Startup Idea: '{idea.title}'
-You are: {target_spec.role} ({target_spec.expertise})
-Peer Reviewer {challenger_spec.role} has challenged your evaluation:
-Challenge: "{challenge_point}"
-
-Respond to this challenge:
-1. Defend your assessment and clarify technical/operational trade-offs.
-2. Formulate how your reasoning, risk appraisal, or implementation roadmap shifts or adjusts in light of this challenge.
-"""
+            step_b_user_prompt = json.dumps({**exchange_context, "challenge_point": challenge_point}, ensure_ascii=False)
             target_res = await self._safe_provider_call(
                 adapter=target_adapter,
                 task="challenge_response",
@@ -543,8 +531,10 @@ Respond to this challenge:
             )
 
             target_parsed = target_res.parsed_json or {}
-            response_text = target_parsed.get("response", "The specialist defended their core architecture while noting the need for stricter onboarding validation.")
-            reasoning_shift = target_parsed.get("reasoning_adjustment", "Adjusted roadmap to mandate staged pilot validation before enterprise rollout.")
+            response_text = target_parsed.get("response")
+            reasoning_shift = target_parsed.get("reasoning_adjustment")
+            if target_res.error or not response_text or not reasoning_shift:
+                raise ValueError(target_res.error or "Target returned no grounded response and qualification")
 
             is_sim = (challenger_spec.provider == "mock" and target_spec.provider == "mock")
 
@@ -581,40 +571,12 @@ Respond to this challenge:
         adapter = get_provider_adapter("mock")
 
         failed_specialists = [f for f in specialist_feedbacks if f.status in ["failed", "timed_out"]]
-        successful_specialists = [f for f in specialist_feedbacks if f.status == "success"]
 
-        prompt_lines = [
-            f"Startup: {idea.title}",
-            f"Problem: {idea.problem}",
-            f"Solution: {idea.proposed_solution}",
-            f"Supplied Evidence Count: {len(idea.evidence)}",
-            f"Failed Specialists Count: {len(failed_specialists)}"
-        ]
-
-        if idea.evidence:
-            prompt_lines.append("Supplied Evidence Items:")
-            for ev in idea.evidence:
-                prompt_lines.append(f"- [{ev.id}] ({ev.data_type}) {ev.summary} (Source: {ev.source})")
-        else:
-            prompt_lines.append("Supplied Evidence Items: None (No empirical evidence provided)")
-
-        if failed_specialists:
-            prompt_lines.append("Failed Specialists (Must be scrutinized in failure impact analysis):")
-            for f in failed_specialists:
-                prompt_lines.append(f"- {f.role} (Status: {f.status}, Reason: {f.error_message})")
-
-        prompt_lines.append("\nSuccessful Specialist Reviews:")
-        for f in successful_specialists:
-            prompt_lines.append(f"Specialist [{f.role}]:")
-            prompt_lines.append(f"  Risks: {', '.join(f.risks)}")
-            prompt_lines.append(f"  Assumptions: {', '.join(f.missing_assumptions)}")
-            if f.validation_experiment:
-                prompt_lines.append(f"  Proposed Exp: {f.validation_experiment.hypothesis} -> {f.validation_experiment.success_metric}")
-
-        if challenges:
-            prompt_lines.append("\nDebate Challenges:")
-            for ch in challenges:
-                prompt_lines.append(f"- {ch.challenger_role} challenged {ch.target_role}: '{ch.challenge_point}' -> Adjusted: '{ch.reasoning_adjustment}'")
+        coordinator_context = {
+            "idea": idea.model_dump(),
+            "reviews": [review_context(f) for f in specialist_feedbacks],
+            "challenges": [c.model_dump() for c in challenges],
+        }
 
         start_t = time.perf_counter()
         try:
@@ -622,12 +584,14 @@ Respond to this challenge:
                 adapter=adapter,
                 task="coordinator_synthesis",
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
-                user_prompt="\n".join(prompt_lines),
+                user_prompt=json.dumps(coordinator_context, ensure_ascii=False),
                 timeout_seconds=self.budget.timeout_seconds
             )
             duration_ms = (time.perf_counter() - start_t) * 1000
 
             parsed = response.parsed_json or {}
+            if response.error or not parsed.get("summary"):
+                raise ValueError(response.error or "Coordinator returned no synthesis")
             ev_data = parsed.get("evidence_sufficiency", {})
             evidence_assessment = EvidenceSufficiencyAssessment(
                 status=ev_data.get("status", "thin"),
@@ -652,10 +616,17 @@ Respond to this challenge:
                     f"Founders must validate these omitted domains independently before committing resources."
                 )
 
+            if response.provider == "mock":
+                provenance = "Deterministic mock synthesis"
+            elif response.is_simulated:
+                provenance = "Simulated synthesis"
+            else:
+                provenance = "Live provider synthesis"
+
             return CoordinatorCombinedReview(
-                summary=parsed.get("summary", "Review board completed assessment."),
-                priorities=parsed.get("priorities", ["Validate key technical bottlenecks.", "Confirm willingness to pay."]),
-                disagreements=parsed.get("disagreements", ["Tension between onboarding simplicity and enterprise security."]),
+                summary=(f"[{provenance}; provider={response.provider}; model={response.model}] {parsed['summary']}"),
+                priorities=parsed.get("priorities", []),
+                disagreements=parsed.get("disagreements", []),
                 next_experiments=experiments,
                 evidence_sufficiency=evidence_assessment,
                 failure_impact_analysis=failure_impact,
