@@ -180,6 +180,7 @@ class BudgetConfig(BaseModel):
 class ReviewBoardSession(BaseModel):
     """Full session state for saving, reopening, or rerunning a review board."""
     session_id: str
+    run_metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution identity and recovery checkpoint metadata")
     created_at: str
     idea: StartupIdeaInput
     panel: List[SpecialistAgentConfig] = Field(..., min_length=3, max_length=5)

@@ -148,6 +148,7 @@ class ReviewBoardOrchestrator:
         self.usage_by_source = {"provider_reported": 0, "estimated": 0, "simulated": 0}
         self.attempts = []
         self.reservation_overrun_tokens = 0
+        self._checkpoint = lambda: None
 
     async def _safe_provider_call(
         self,
@@ -189,7 +190,10 @@ class ReviewBoardOrchestrator:
         effective_timeout = timeout_seconds if timeout_seconds is not None else self.budget.timeout_seconds
         response, error = None, None
         start = time.perf_counter()
+        dispatched = False
         try:
+            self._checkpoint()
+            dispatched = True
             response = await bounded_await(adapter.call(
                 task=task, system_prompt=system_prompt, user_prompt=user_prompt, model=model,
                 timeout_seconds=effective_timeout, simulate_failure=simulate_failure,
@@ -210,44 +214,52 @@ class ReviewBoardOrchestrator:
             raise
         finally:
             elapsed = (time.perf_counter() - start) * 1000
-            if response is not None:
-                counts = {k: getattr(response, k) for k in ("input_tokens", "output_tokens", "total_tokens", "usage_source", "usage_breakdown_estimated")}
-                # Never undercount when a provider's total disagrees with its components.
-                counts["total_tokens"] = max(counts["total_tokens"], counts["input_tokens"] + counts["output_tokens"])
-                cost = response.cost_estimate_usd
-                status = response.error.split(":", 1)[0] if response.error else "success"
-            else:
-                reported_usage = getattr(error, "usage", None)
-                if reported_usage is not None:
-                    counts = usage_counts(reported_usage, input_reserve, output_reserve)
-                elif getattr(error, "request_sent", True) is False:
-                    counts = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                              "usage_source": "simulated" if getattr(adapter, "provider_name", None) == "mock" else "estimated"}
+            if not dispatched:
+                async with self._budget_lock:
+                    self.calls_made -= 1
+                    self.reserved_tokens -= reservation
+                    self.attempts.remove(entry)
+            if dispatched:
+                if response is not None:
+                    counts = {k: getattr(response, k) for k in ("input_tokens", "output_tokens", "total_tokens", "usage_source", "usage_breakdown_estimated")}
+                    # Never undercount when a provider's total disagrees with its components.
+                    counts["total_tokens"] = max(counts["total_tokens"], counts["input_tokens"] + counts["output_tokens"])
+                    cost = response.cost_estimate_usd
+                    status = response.error.split(":", 1)[0] if response.error else "success"
                 else:
-                    counts = {"input_tokens": input_reserve, "output_tokens": output_reserve,
-                              "total_tokens": reservation, "usage_source": "estimated"}
-                cost = BaseAIAdapter.calculate_cost(getattr(adapter, "provider_name", "unknown"), model,
-                                                    counts["input_tokens"], counts["output_tokens"])
-                status = "timeout" if isinstance(error, asyncio.TimeoutError) else "cancelled" if isinstance(error, asyncio.CancelledError) else "provider_error"
-            async with self._budget_lock:
-                self.reserved_tokens -= reservation
-                self.tokens_used += counts["total_tokens"]
-                self.usage_by_source[counts["usage_source"]] += counts["total_tokens"]
-                self.total_cost_usd += cost
-                self.total_latency_ms += elapsed
-                self.reservation_overrun_tokens += max(0, counts["total_tokens"] - reservation)
-                if self.tokens_used >= self.budget.token_cap:
-                    self.budget_stopped = True
-                entry.update(counts, status=status, latency_ms=round(elapsed, 2),
-                             cancellation_uncertain=bool(getattr(error, "cancellation_uncertain", False)
-                                                        or (isinstance(error, asyncio.CancelledError) and getattr(adapter, "provider_name", None) != "mock")))
+                    reported_usage = getattr(error, "usage", None)
+                    if reported_usage is not None:
+                        counts = usage_counts(reported_usage, input_reserve, output_reserve)
+                    elif getattr(error, "request_sent", True) is False:
+                        counts = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                                  "usage_source": "simulated" if getattr(adapter, "provider_name", None) == "mock" else "estimated"}
+                    else:
+                        counts = {"input_tokens": input_reserve, "output_tokens": output_reserve,
+                                  "total_tokens": reservation, "usage_source": "estimated"}
+                    cost = BaseAIAdapter.calculate_cost(getattr(adapter, "provider_name", "unknown"), model,
+                                                        counts["input_tokens"], counts["output_tokens"])
+                    status = "timeout" if isinstance(error, asyncio.TimeoutError) else "cancelled" if isinstance(error, asyncio.CancelledError) else "provider_error"
+                async with self._budget_lock:
+                    self.reserved_tokens -= reservation
+                    self.tokens_used += counts["total_tokens"]
+                    self.usage_by_source[counts["usage_source"]] += counts["total_tokens"]
+                    self.total_cost_usd += cost
+                    self.total_latency_ms += elapsed
+                    self.reservation_overrun_tokens += max(0, counts["total_tokens"] - reservation)
+                    if self.tokens_used >= self.budget.token_cap:
+                        self.budget_stopped = True
+                    entry.update(counts, status=status, latency_ms=round(elapsed, 2),
+                                 cancellation_uncertain=bool(getattr(error, "cancellation_uncertain", False)
+                                                            or (isinstance(error, asyncio.CancelledError) and getattr(adapter, "provider_name", None) != "mock")))
+                self._checkpoint()
 
     async def execute_board(
         self,
         idea: StartupIdeaInput,
         panel: List[SpecialistAgentConfig],
         session_id: Optional[str] = None,
-        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        checkpoint_callback: Optional[Callable[[ReviewBoardSession], None]] = None,
     ) -> ReviewBoardSession:
         """Run the complete 3-phase review board workflow with progress callbacks."""
         sid = session_id or str(uuid.uuid4())
@@ -262,10 +274,26 @@ class ReviewBoardOrchestrator:
             status="in_progress"
         )
 
+        def checkpoint():
+            session.execution_summary = self._build_execution_summary()
+            if checkpoint_callback:
+                checkpoint_callback(session)
+        self._checkpoint = checkpoint
+
         valid_evidence_ids = {e.id.strip().upper() for e in idea.evidence}
         panel_map = {s.id: s for s in panel}
 
         def _notify(event_type: str, data: Dict[str, Any]):
+            if event_type == "phase_started":
+                session.run_metadata["phase"] = data["phase"]
+            if event_type == "specialist_started":
+                session.run_metadata["active_specialist_id"] = data["specialist_id"]
+            if event_type == "specialist_completed":
+                session.run_metadata["active_specialist_id"] = None
+            if event_type == "challenge_exchange":
+                session.challenge_round.append(ChallengeResponseItem.model_validate(data["item"]))
+            session.run_metadata["last_event"] = event_type
+            self._checkpoint()
             if progress_callback:
                 try:
                     progress_callback({"type": event_type, "session_id": sid, **data})
@@ -292,6 +320,7 @@ class ReviewBoardOrchestrator:
                 valid_evidence_ids=valid_evidence_ids
             )
             specialist_feedbacks.append(feedback)
+            session.specialist_reviews = specialist_feedbacks
             if feedback.status in ["failed", "timed_out"]:
                 self.failures_encountered += 1
 

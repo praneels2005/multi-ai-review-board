@@ -34,8 +34,19 @@ function mountApp() {
     mandate: 'Mandate', rationale: 'Rationale', provider: 'mock', model: 'mock-deterministic',
   }));
   vm.runInNewContext(compiled, {
-    exports, console, TextDecoder,
+    exports, console, TextDecoder, crypto: require('node:crypto').webcrypto,
     require(name) {
+      if (name === './reviewExecution') {
+        const helper = {};
+        const source = fs.readFileSync(path.join(__dirname, '../src/reviewExecution.ts'), 'utf8');
+        vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
+          { exports: helper, TextDecoder, setTimeout, fetch: async (url, options) => {
+            requests.push({ url, options });
+            const payload = JSON.parse(options.body);
+            return { ok: true, json: async () => ({ session_id: payload.session_id, status: 'completed', specialist_reviews: [], challenge_round: [], execution_summary: { calls_made: 0, total_latency_ms: 0, total_tokens: 0, total_cost_usd: 0 }, run_metadata: { sequence: 1 } }) };
+          } });
+        return helper;
+      }
       if (name === 'react') return hooks;
       if (name === 'react/jsx-runtime') return jsx;
       if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
@@ -89,7 +100,7 @@ test('provider/model switches remain paired in the outgoing review request', asy
     providerSelect.props.onChange({ target: { value: provider } });
     tree = app.render();
     await button(tree, 'Run Review Board').props.onClick();
-    const request = app.requests.filter(r => r.url.endsWith('/run-stream')).at(-1);
+    const request = app.requests.filter(r => r.url.endsWith('/runs')).at(-1);
     const sentPanel = JSON.parse(request.options.body).panel;
     assert.equal(sentPanel[0].provider, provider);
     assert.equal(sentPanel[0].model, model);

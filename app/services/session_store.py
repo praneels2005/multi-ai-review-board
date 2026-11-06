@@ -7,6 +7,8 @@ with strict path traversal protection and rerun lineage tracking.
 import json
 import os
 import re
+import fcntl
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -41,25 +43,76 @@ class SessionStore:
     def save(cls, session: ReviewBoardSession) -> None:
         """Persist session object to disk as JSON."""
         file_path = cls._validate_session_id(session.session_id)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(session.model_dump_json(indent=2))
+        # Atomic replacement prevents readers seeing a partially written checkpoint.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=file_path.parent,
+                                             prefix=".checkpoint-", delete=False) as f:
+                temporary = f.name
+                f.write(session.model_dump_json(indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, file_path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
 
     @classmethod
-    def get(cls, session_id: str) -> Optional[ReviewBoardSession]:
+    def acquire_run_lock(cls, session_id):
+        path = cls._validate_session_id(session_id).with_suffix(".lock")
+        handle = open(path, "a")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            handle.close()
+            return None
+
+    @staticmethod
+    def release_run_lock(handle):
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+    @staticmethod
+    def interrupted(session):
+        session = session.model_copy(deep=True)
+        session.status = "partial_failure" if session.specialist_reviews or session.challenge_round or session.combined_review else "failed"
+        session.run_metadata["interrupted"] = True
+        session.run_metadata["interruption_reason"] = "Execution owner stopped; dispatched calls are not resumed. In-flight usage and remote completion may be unknown."
+        return session
+
+    @classmethod
+    def get(cls, session_id: str, *, detect_interruption: bool = True) -> Optional[ReviewBoardSession]:
         """Load session by session_id."""
         file_path = cls._validate_session_id(session_id)
         if not file_path.exists():
             return None
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return ReviewBoardSession(**data)
+            session = ReviewBoardSession(**data)
+        if detect_interruption and session.status == "in_progress":
+            lock_path = file_path.with_suffix(".lock")
+            if not lock_path.exists():
+                return cls.interrupted(session)
+            handle = cls.acquire_run_lock(session_id)
+            if handle is not None:
+                try:
+                    # The owner may have finished between the first read and lock acquisition.
+                    session = ReviewBoardSession.model_validate_json(file_path.read_text(encoding="utf-8"))
+                    return cls.interrupted(session) if session.status == "in_progress" else session
+                finally:
+                    cls.release_run_lock(handle)
+        return session
 
     @classmethod
     def record_rerun_lineage(cls, parent_id: str, child_id: str) -> None:
         """Record that child_id is a rerun of parent_id, preserving both."""
-        parent = cls.get(parent_id)
-        if parent:
-            if child_id not in parent.rerun_history:
+        path = cls._validate_session_id(parent_id).with_suffix(".lineage-lock")
+        with open(path, "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            parent = cls.get(parent_id)
+            if parent and child_id not in parent.rerun_history:
                 parent.rerun_history.append(child_id)
                 cls.save(parent)
 
@@ -72,6 +125,8 @@ class SessionStore:
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    session = cls.get(file.stem)
+                    data = session.model_dump()
                     idea_data = data.get("idea", {})
                     summaries.append({
                         "session_id": data.get("session_id"),

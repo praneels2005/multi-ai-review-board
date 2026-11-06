@@ -5,10 +5,7 @@ Provides endpoints for presets, panel generation, executing review boards
 and rerunning sessions with lineage tracking.
 """
 
-import asyncio
-import json
-import uuid
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any, Optional
 
@@ -21,8 +18,8 @@ from app.schemas.review_board_schema import (
     BudgetConfig,
 )
 from app.services.panel_service import PanelService
-from app.services.review_orchestrator import ReviewBoardOrchestrator
 from app.services.session_store import SessionStore
+from app.services.review_runs import ReviewRuns, RunConflict
 
 router = APIRouter(prefix="/api/review-board", tags=["Multiple AI Review Board"])
 
@@ -47,67 +44,51 @@ async def generate_panel(request: GeneratePanelRequest):
         raise HTTPException(status_code=500, detail=f"Failed to generate specialist panel: {str(e)}")
 
 
-@router.post("/run", response_model=ReviewBoardSession)
-async def run_review_board(request: RunReviewRequest):
-    """Execute the multi-agent review board (independent reviews, debate, and coordinator synthesis)."""
+def start_identified_run(request, key=None, parent=None):
     try:
-        orchestrator = ReviewBoardOrchestrator(budget_config=request.budget_config)
-        session = await orchestrator.execute_board(
-            idea=request.idea,
-            panel=request.panel,
-            session_id=request.session_id
-        )
-        SessionStore.save(session)
-        return session
-    except ValueError as ve:
-        raise HTTPException(status_code=422, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Review board execution failed: {str(e)}")
+        return ReviewRuns.start(request, key, parent)
+    except RunConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/runs", response_model=ReviewBoardSession, status_code=202)
+async def start_review_board(request: RunReviewRequest, idempotency_key: Optional[str] = Header(None)):
+    """Start or attach to an identified run without waiting or subscribing."""
+    sid = start_identified_run(request, idempotency_key)
+    return ReviewRuns.snapshot(sid)
+
+
+@router.post("/run", response_model=ReviewBoardSession)
+async def run_review_board(request: RunReviewRequest, idempotency_key: Optional[str] = Header(None)):
+    """Compatibility endpoint: start once, then await the same durable run."""
+    sid = start_identified_run(request, idempotency_key)
+    return await ReviewRuns.wait(sid)
 
 
 @router.post("/run-stream")
-async def run_review_board_stream(request: RunReviewRequest):
-    """
-    Execute review board with real-time Server-Sent Events (SSE) streaming progress.
-    Emits per-agent start/complete events, debate exchanges, and final session state.
-    """
+async def run_review_board_stream(request: RunReviewRequest, idempotency_key: Optional[str] = Header(None)):
+    """Compatibility endpoint: start once, then subscribe independently."""
+    sid = start_identified_run(request, idempotency_key)
+    return StreamingResponse(ReviewRuns.events(sid), media_type="text/event-stream",
+                             headers={"X-Review-Session-ID": sid, "Cache-Control": "no-cache"})
+
+
+@router.get("/sessions/{session_id}/events")
+async def subscribe_review(session_id: str, after: int = Query(0, ge=0), last_event_id: Optional[str] = Header(None)):
+    """Read snapshots only. Subscribing can never start provider work."""
     try:
-        queue: asyncio.Queue = asyncio.Queue()
-
-        def progress_callback(event: Dict[str, Any]):
-            queue.put_nowait(event)
-
-        async def sse_event_generator():
-            orchestrator = ReviewBoardOrchestrator(budget_config=request.budget_config)
-            
-            # Run board in background task within loop
-            task = asyncio.create_task(
-                orchestrator.execute_board(
-                    idea=request.idea,
-                    panel=request.panel,
-                    session_id=request.session_id,
-                    progress_callback=progress_callback
-                )
-            )
-
-            while not task.done() or not queue.empty():
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=0.2)
-                    yield f"data: {json.dumps(event)}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-
-            session = await task
-            SessionStore.save(session)
-            final_event = {"type": "session_final", "session": session.model_dump()}
-            yield f"data: {json.dumps(final_event)}\n\n"
-
-        return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
-
-    except ValueError as ve:
-        raise HTTPException(status_code=422, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stream execution failed: {str(e)}")
+        ReviewRuns.snapshot(session_id)
+        cursor = max(after, int(last_event_id or 0))
+        if cursor < 0:
+            raise ValueError("Invalid event cursor")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Review session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return StreamingResponse(ReviewRuns.events(session_id, cursor), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/sessions", response_model=List[Dict[str, Any]])
@@ -129,34 +110,18 @@ def get_session(session_id: str):
 
 
 @router.post("/sessions/{session_id}/rerun", response_model=ReviewBoardSession)
-async def rerun_session(session_id: str, budget_config: Optional[BudgetConfig] = None):
-    """
-    Rerun an existing review session preserving history.
-    Generates a new session linked to the parent without overwriting the previous run.
-    """
+async def rerun_session(session_id: str, budget_config: Optional[BudgetConfig] = None,
+                        idempotency_key: Optional[str] = Header(None)):
+    """Explicit new run; an optional key also makes retries of this action safe."""
     try:
-        existing = SessionStore.get(session_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"Review session '{session_id}' not found.")
-
-        new_session_id = str(uuid.uuid4())
-        cfg = budget_config or existing.budget_config
-        orchestrator = ReviewBoardOrchestrator(budget_config=cfg)
-
-        new_session = await orchestrator.execute_board(
-            idea=existing.idea,
-            panel=existing.panel,
-            session_id=new_session_id
-        )
-        new_session.rerun_of_session_id = existing.session_id
-        new_session.version = existing.version + 1
-
-        # Save both new session and update parent rerun history
-        SessionStore.save(new_session)
-        SessionStore.record_rerun_lineage(existing.session_id, new_session_id)
-
-        return new_session
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Rerunning review session failed: {str(e)}")
+        existing = ReviewRuns.snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Review session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if existing.status == "in_progress":
+        raise HTTPException(status_code=409, detail="Original run is still active")
+    request = RunReviewRequest(idea=existing.idea, panel=existing.panel,
+                               budget_config=budget_config or existing.budget_config)
+    sid = start_identified_run(request, idempotency_key, parent=session_id)
+    return await ReviewRuns.wait(sid)
