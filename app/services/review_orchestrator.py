@@ -332,23 +332,12 @@ class ReviewBoardOrchestrator:
     ) -> SpecialistFeedback:
         """Execute a specialist review with per-agent timeout, strict output validation, and at most one retry."""
         adapter = get_provider_adapter(specialist.provider)
-        evidence_text = "\n".join([f"[{e.id}] ({e.data_type}) {e.summary}" for e in idea.evidence]) or "None"
-
-        user_prompt = f"""Review the following startup idea according to your mandate:
-Role: {specialist.role}
-Domain Expertise: {specialist.expertise}
-Review Mandate: {specialist.mandate}
-Rationale: {specialist.rationale}
-
-Startup Details:
-Title: {idea.title}
-Target Customer: {idea.target_customer}
-Problem: {idea.problem}
-Proposed Solution: {idea.proposed_solution}
-Idea Description: {idea.idea}
-Supplied Evidence Items:
-{evidence_text}
-"""
+        # Keep identity, mandate, founder claims, and evidence separate. JSON encoding
+        # prevents newlines or prompt-like text from becoming structural fields.
+        user_prompt = json.dumps({
+            "specialist": specialist.model_dump(include={"id", "role", "expertise", "mandate", "rationale"}),
+            "idea": idea.model_dump(),
+        }, ensure_ascii=False)
 
         max_attempts = 1 + min(self.budget.max_retries, 1)  # At most one retry
         last_error = ""
