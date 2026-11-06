@@ -171,9 +171,15 @@ def _perspective(specialist: dict) -> Perspective:
     return PERSPECTIVES[best] if any(scores[best]) else GENERAL
 
 
+def _hypothetical_source(source: str) -> bool:
+    """Recognize explicit non-observation labels without inferring credibility."""
+    return bool(re.search(r"\b(hypothetical|forecast|projection|projected|prediction|predicted|unmeasured)\b", source, re.I))
+
+
 def _cpu_comparison(solution: str, evidence: list[dict]) -> tuple[list[str], list[str]]:
     """Compare only a narrow, explicit CPU ceiling/observation grammar.
 
+    Source labels can disqualify hypothetical reports; sources never supply metrics.
     No range, negation, hypothetical, multiple-reading, or conflict resolution.
     Ambiguous summaries are still quoted by the caller but not interpreted.
     """
@@ -184,6 +190,8 @@ def _cpu_comparison(solution: str, evidence: list[dict]) -> tuple[list[str], lis
     observed = []
     for item in evidence:
         summary = item["summary"]
+        if _hypothetical_source(item["source"]):
+            continue
         if item["data_type"] != "benchmark" or re.search(
             r"\b(not|no|never|expected|target|claimed?|predicted|hypothetical|baseline|competitor|if|might|could|would|between|approximately|about)\b|[<>≤≥]|\d\s*[-–]\s*\d",
             summary, re.I,
@@ -245,11 +253,13 @@ def specialist_feedback(user_prompt: str) -> dict:
         citations.append(evidence_id)
         unknowns.append(f"Supplied report [{evidence_id}] ({item['data_type']}, source: {item['source']}): {item['summary']}")
         # Lexical relevance only: use the report as a question, not a favorable finding.
-        if _score(item["summary"], perspective):
+        if _score(item["summary"] + " " + item["source"], perspective):
             questions.append(
-                f"Evidence follow-up [{evidence_id}] for {perspective.focus}: the supplied report says {item['summary']} "
+                f"Evidence follow-up [{evidence_id}] for {perspective.focus}: source {item['source']} reports {item['summary']} "
                 f"What methods and conditions connect this report to the assumption that {perspective.assumption}?"
             )
+        if _hypothetical_source(item["source"]):
+            unknowns.append(f"Evidence limit [{evidence_id}]: the source is labeled hypothetical, projected, predicted, or unmeasured; do not treat its figures as observed results.")
         if item["data_type"] == "anecdote":
             unknowns.append(f"Evidence limit [{evidence_id}]: an anecdote alone cannot establish causality, clinical efficacy, or representative demand.")
     if not evidence:

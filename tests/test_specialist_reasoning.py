@@ -94,16 +94,17 @@ def test_presets_complete_without_fallback_and_with_distinct_experiments(boards,
     assert session.combined_review.failure_impact_analysis is None
 
 
-def test_favorable_cpu_report_becomes_adverse_when_measurement_changes(boards):
+@pytest.mark.parametrize("overhead", ["24.5", "90"])
+def test_favorable_cpu_report_becomes_adverse_when_measurement_changes(boards, overhead):
     idea, panel, _ = boards["devtool_ebpf"]
     changed = idea.model_copy(deep=True)
     changed.evidence[0].id = "BENCH-CPU-9"
     changed.evidence[0].summary = "CPU overhead measured 1.18% under the stated workload."
     favorable = review(changed, panel[1])
     assert "CPU overhead 1.18% is below the proposed ceiling 1.5%" in " ".join(favorable["strengths"])
-    changed.evidence[0].summary = "CPU overhead measured 90%, unacceptable to all customers."
+    changed.evidence[0].summary = f"CPU overhead measured {overhead}%, unacceptable to all customers."
     adverse = review(changed, panel[1])
-    assert "CPU overhead 90% is not below the proposed ceiling 1.5%" in " ".join(adverse["risks"])
+    assert f"CPU overhead {overhead}% is not below the proposed ceiling 1.5%" in " ".join(adverse["risks"])
     assert "cpu overhead 1.18%" not in text(adverse)
     assert "sub-2%" not in text(adverse)
     assert not any("Supplied report" in s for s in adverse["strengths"])
@@ -153,15 +154,16 @@ def test_conflicting_cpu_reports_remain_visible(boards):
     assert not any("Supplied report" in s for s in r["strengths"])
 
 
-def test_arbitrary_ids_and_report_content_survive_orchestrator(boards):
+@pytest.mark.parametrize("evidence_id", ["E3", "E99", "lab.cpu-2026"])
+def test_arbitrary_ids_and_report_content_survive_orchestrator(boards, evidence_id):
     idea, panel, _ = boards["devtool_ebpf"]
     changed = idea.model_copy(deep=True)
-    changed.evidence = [EvidenceItem(id="lab.cpu-2026", source="Independent lab",
+    changed.evidence = [EvidenceItem(id=evidence_id, source="Independent lab",
         summary="CPU overhead measured 90%.", data_type="benchmark")]
     result = asyncio.run(ReviewBoardOrchestrator()._run_single_specialist_with_retry(
-        panel[1], changed, {"LAB.CPU-2026"}))
+        panel[1], changed, {evidence_id.upper()}))
     assert result.status == "success"
-    assert result.evidence_citations == ["LAB.CPU-2026"]
+    assert result.evidence_citations == [evidence_id.upper()]
     assert result.invalid_citations == []
     assert "90% is not below" in " ".join(result.risks)
     assert "Independent lab" in " ".join(result.assumptions_and_unknowns)
@@ -262,3 +264,30 @@ def test_unrecognized_specialty_discloses_bounded_coverage(boards):
     assert "cannot supply domain-specific conclusions" in text(r["assumptions_and_unknowns"])
     assert "coral bleaching" in text(r["questions"])
     assert "kernel incompatibility" not in text(r["risks"])
+
+
+def test_source_mutation_distinguishes_projection_from_observation(boards):
+    idea, panel, _ = boards["devtool_ebpf"]
+    changed = idea.model_copy(deep=True)
+    changed.evidence[0].source = "Measured laboratory benchmark"
+    measured = review(changed, panel[1])
+    assert "1.18% is below" in text(measured["strengths"])
+    changed.evidence[0].source = "Hypothetical CPU overhead projection (unmeasured)"
+    projected = review(changed, panel[1])
+    assert "1.18% is below" not in text(projected["strengths"])
+    assert "do not treat its figures as observed results" in text(projected["assumptions_and_unknowns"])
+    assert changed.evidence[0].source in " ".join(projected["assumptions_and_unknowns"])
+    assert changed.evidence[0].summary in " ".join(projected["assumptions_and_unknowns"])
+
+
+def test_source_relevance_adds_question_without_inventing_metrics(boards):
+    idea, panel, _ = boards["devtool_ebpf"]
+    changed = idea.model_copy(deep=True)
+    changed.evidence = [EvidenceItem(id="E3", source="Document archive", summary="Findings require further review.", data_type="other")]
+    neutral = review(changed, panel[2])
+    changed.evidence[0].source = "Security permissions audit"
+    relevant = review(changed, panel[2])
+    assert not any("Evidence follow-up [E3]" in q for q in neutral["questions"])
+    assert any("Evidence follow-up [E3]" in q and "Security permissions audit" in q for q in relevant["questions"])
+    assert neutral["strengths"] == relevant["strengths"]
+    assert relevant["evidence_citations"] == ["E3"]
