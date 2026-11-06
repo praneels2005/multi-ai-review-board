@@ -10,11 +10,16 @@ import json
 import time
 from typing import Optional, Dict, Any
 from app.models.connectors.base_connector import AITask, BaseAIAdapter, NormalizedProviderResponse
+from app.models.connectors.execution_usage import ProviderCallError, ProviderTimeoutError, usage_counts, exception_usage, conservative_tokens
 
 
 class DeterministicMockAdapter(BaseAIAdapter):
     """Deterministic mock adapter generating rich domain-specific review responses."""
     provider_name = "mock"
+
+    def estimate_input_tokens(self, system_prompt, user_prompt):
+        # Exact input count for the mock's defined simulated tokenizer.
+        return len(system_prompt + user_prompt) // 4
 
     async def call(
         self,
@@ -26,6 +31,7 @@ class DeterministicMockAdapter(BaseAIAdapter):
         simulate_failure: Optional[str] = None,
         *,
         task: AITask = "specialist_review",
+        max_output_tokens: int = 4096,
     ) -> NormalizedProviderResponse:
         start_time = time.perf_counter()
         active_model = model or "mock-deterministic"
@@ -33,15 +39,15 @@ class DeterministicMockAdapter(BaseAIAdapter):
         # Handle failure simulations for tests and demo walkthroughs
         if simulate_failure == "timeout":
             if timeout_seconds > 0:
-                await asyncio.sleep(min(timeout_seconds + 0.5, 2.0))
-            raise asyncio.TimeoutError(f"Provider call to {active_model} timed out after {timeout_seconds}s")
+                await asyncio.sleep(timeout_seconds)
+            raise ProviderTimeoutError(f"Mock call to {active_model} timed out after {timeout_seconds}s; local simulation stopped", request_sent=False)
 
         if simulate_failure == "provider_error":
-            await asyncio.sleep(0.1)
-            raise ConnectionError(f"Simulated upstream connection failure to provider '{self.provider_name}'")
+            await asyncio.sleep(min(0.1, timeout_seconds / 2))
+            raise ProviderCallError(f"Simulated upstream connection failure to provider '{self.provider_name}'", retryable=True, request_sent=False)
 
         if simulate_failure == "malformed_output":
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(min(0.15, timeout_seconds / 2))
             malformed_text = '{"status": "incomplete", "strengths": ["Premature closure", "error": syntax_error'
             latency = (time.perf_counter() - start_time) * 1000
             return NormalizedProviderResponse(
@@ -55,11 +61,12 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 output_tokens=30,
                 total_tokens=180,
                 cost_estimate_usd=self.calculate_cost(self.provider_name, active_model, 150, 30),
+                usage_source="simulated",
                 error="malformed_json: Malformed JSON response from mock provider"
             )
 
         # Realistic simulated network latency (150ms to 350ms)
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(min(0.15, timeout_seconds / 2))
 
         # Generate deterministic response based on prompt contents
         parsed_data = self._generate_deterministic_content(task, system_prompt, user_prompt)
@@ -83,6 +90,7 @@ class DeterministicMockAdapter(BaseAIAdapter):
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             cost_estimate_usd=cost,
+            usage_source="simulated",
             error=output_error
         )
 

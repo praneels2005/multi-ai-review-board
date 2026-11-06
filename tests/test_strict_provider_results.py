@@ -241,10 +241,10 @@ def test_live_adapter_parsing_and_schema_errors_remain_distinct(provider, raw, c
     class Fake:
         async def create(self, **kwargs):
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=raw))], usage=None)
-        def generate_content(self, **kwargs):
+        async def generate_content(self, **kwargs):
             return SimpleNamespace(text=raw)
     fake = Fake()
-    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake), models=fake)
+    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake), aio=SimpleNamespace(models=fake))
     result = asyncio.run(adapter.call("S", "U", task="coordinator_synthesis"))
     assert result.error.startswith(category + ":")
     assert result.is_simulated is False
@@ -257,10 +257,10 @@ def test_live_api_errors_and_parsed_content_redact_credentials(provider):
     class Fake:
         async def create(self, **kwargs):
             raise ConnectionError(f"upstream rejected {secret}")
-        def generate_content(self, **kwargs):
+        async def generate_content(self, **kwargs):
             raise ConnectionError(f"upstream rejected {secret}")
     fake = Fake()
-    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake), models=fake)
+    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake), aio=SimpleNamespace(models=fake))
     with pytest.raises(RuntimeError) as raised:
         asyncio.run(adapter.call("S", "U"))
     assert "API Error" in str(raised.value) and secret not in str(raised.value)
@@ -268,10 +268,10 @@ def test_live_api_errors_and_parsed_content_redact_credentials(provider):
     class ValidFake:
         async def create(self, **kwargs):
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=raw))], usage=None)
-        def generate_content(self, **kwargs):
+        async def generate_content(self, **kwargs):
             return SimpleNamespace(text=raw)
     good = ValidFake()
-    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=good), models=good)
+    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=good), aio=SimpleNamespace(models=good))
     result = asyncio.run(adapter.call("S", "U", task="challenge_generation"))
     assert result.error is None and secret not in result.raw_text
     assert secret not in result.parsed_json["challenge_point"]
@@ -297,10 +297,10 @@ def test_live_timeouts_remain_timeouts(provider):
     class Fake:
         async def create(self, **kwargs):
             raise asyncio.TimeoutError()
-        def generate_content(self, **kwargs):
+        async def generate_content(self, **kwargs):
             raise asyncio.TimeoutError()
     fake = Fake()
-    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake), models=fake)
+    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake), aio=SimpleNamespace(models=fake))
     with pytest.raises(asyncio.TimeoutError) as raised:
         asyncio.run(adapter.call("S", "U"))
     assert "timed out" in str(raised.value)

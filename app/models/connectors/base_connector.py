@@ -26,10 +26,12 @@ class NormalizedProviderResponse(BaseModel):
     model: str
     is_simulated: bool
     latency_ms: float
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
     cost_estimate_usd: float = 0.0
+    usage_source: Literal["provider_reported", "estimated", "simulated"] = "estimated"
+    usage_breakdown_estimated: bool = False
     error: Optional[str] = None
 
 
@@ -48,6 +50,7 @@ class BaseAIAdapter(ABC):
         simulate_failure: Optional[str] = None,
         *,
         task: AITask = "specialist_review",
+        max_output_tokens: int = 4096,
     ) -> NormalizedProviderResponse:
         """Execute a caller-selected task and return a normalized response.
 
@@ -56,6 +59,22 @@ class BaseAIAdapter(ABC):
         The default preserves existing standalone specialist-review callers.
         """
         pass
+
+    def check_configuration(self):
+        """Fail locally before reserving a provider attempt, if misconfigured."""
+        if any(not task.done() for task in getattr(self, "_pending_requests", ())):
+            raise ValueError("Previous SDK request has not finished cancellation; no duplicate request was dispatched")
+
+    async def bounded_request(self, awaitable, timeout):
+        from app.models.connectors.execution_usage import bounded_await
+        if not hasattr(self, "_pending_requests"):
+            self._pending_requests = set()
+        return await bounded_await(awaitable, timeout, pending=self._pending_requests)
+
+
+    def estimate_input_tokens(self, system_prompt, user_prompt):
+        from app.models.connectors.execution_usage import conservative_tokens
+        return conservative_tokens(system_prompt + self.sanitize_prompt_data(user_prompt))
 
     @staticmethod
     def sanitize_prompt_data(raw_text: str) -> str:

@@ -29,7 +29,8 @@ from app.schemas.review_board_schema import (
 )
 from app.models.connectors.factory import get_provider_adapter
 from app.models.connectors.mock_deliberation import review_context, select_pairs
-from app.models.connectors.base_connector import AITask, NormalizedProviderResponse
+from app.models.connectors.base_connector import AITask, NormalizedProviderResponse, BaseAIAdapter
+from app.models.connectors.execution_usage import ProviderTimeoutError, usage_counts, bounded_await
 from app.schemas.provider_results import validate_result, ResponseFailure
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,11 @@ class ReviewBoardOrchestrator:
         self.total_latency_ms = 0.0
         self.failures_encountered = 0
         self.budget_stopped = False
+        self._budget_lock = asyncio.Lock()
+        self.reserved_tokens = 0
+        self.usage_by_source = {"provider_reported": 0, "estimated": 0, "simulated": 0}
+        self.attempts = []
+        self.reservation_overrun_tokens = 0
 
     async def _safe_provider_call(
         self,
@@ -158,39 +164,83 @@ class ReviewBoardOrchestrator:
         Reserves call from budget immediately before making provider invocation,
         preventing retries or coordinator calls from exceeding configured caps.
         """
-        # 1. Hard Call Cap Check
-        if self.calls_made >= self.budget.call_cap:
-            self.budget_stopped = True
-            raise BudgetExceededError(f"Call cap reached ({self.calls_made}/{self.budget.call_cap})")
+        # Configuration failures are local, not provider attempts.
+        if hasattr(adapter, "check_configuration"):
+            adapter.check_configuration()
+        estimate = getattr(adapter, "estimate_input_tokens", None)
+        input_reserve = (estimate(system_prompt, user_prompt) if estimate else
+                         len((system_prompt + user_prompt).encode("utf-8")) + 256)
+        output_reserve = self.budget.max_output_tokens_per_call
+        reservation = input_reserve + output_reserve
+        async with self._budget_lock:
+            if self.budget_stopped or self.calls_made >= self.budget.call_cap:
+                self.budget_stopped = True
+                raise BudgetExceededError(f"Call budget exhausted ({self.calls_made}/{self.budget.call_cap})")
+            if self.tokens_used + self.reserved_tokens + reservation > self.budget.token_cap:
+                self.budget_stopped = True
+                raise BudgetExceededError("Token cap cannot cover input plus output reservation")
+            self.calls_made += 1
+            self.reserved_tokens += reservation
+            entry = {"attempt": self.calls_made, "task": task,
+                     "provider": getattr(adapter, "provider_name", "unknown"), "model": model,
+                     "reserved_tokens": reservation, "status": "in_flight"}
+            self.attempts.append(entry)
 
-        # 2. Hard Token Cap Pre-check (Reserve estimated input + baseline output tokens)
-        estimated_tokens = (len(system_prompt) + len(user_prompt)) // 4 + 400
-        if (self.tokens_used + estimated_tokens) > self.budget.token_cap:
-            self.budget_stopped = True
-            raise BudgetExceededError(
-                f"Token cap would be exceeded ({self.tokens_used} consumed + est. {estimated_tokens} > cap {self.budget.token_cap})"
-            )
-
-        # 3. Reserve call immediately
-        self.calls_made += 1
         effective_timeout = timeout_seconds if timeout_seconds is not None else self.budget.timeout_seconds
-
-        # 4. Invoke Provider
-        response = await adapter.call(
-            task=task,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=model,
-            timeout_seconds=effective_timeout,
-            simulate_failure=simulate_failure
-        )
-
-        # 5. Reconcile usage
-        self.tokens_used += response.total_tokens
-        self.total_cost_usd += response.cost_estimate_usd
-        self.total_latency_ms += response.latency_ms
-
-        return response
+        response, error = None, None
+        start = time.perf_counter()
+        try:
+            response = await bounded_await(adapter.call(
+                task=task, system_prompt=system_prompt, user_prompt=user_prompt, model=model,
+                timeout_seconds=effective_timeout, simulate_failure=simulate_failure,
+                max_output_tokens=output_reserve,
+            ), effective_timeout, request_sent=getattr(adapter, "provider_name", None) != "mock")
+            return response
+        except asyncio.TimeoutError as exc:
+            if isinstance(exc, ProviderTimeoutError):
+                error = exc
+            else:
+                error = ProviderTimeoutError(
+                    f"Timed out after {effective_timeout}s; remote completion and billing are unknown",
+                    request_sent=getattr(adapter, "provider_name", None) != "mock",
+                )
+            raise error from None
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            elapsed = (time.perf_counter() - start) * 1000
+            if response is not None:
+                counts = {k: getattr(response, k) for k in ("input_tokens", "output_tokens", "total_tokens", "usage_source", "usage_breakdown_estimated")}
+                # Never undercount when a provider's total disagrees with its components.
+                counts["total_tokens"] = max(counts["total_tokens"], counts["input_tokens"] + counts["output_tokens"])
+                cost = response.cost_estimate_usd
+                status = response.error.split(":", 1)[0] if response.error else "success"
+            else:
+                reported_usage = getattr(error, "usage", None)
+                if reported_usage is not None:
+                    counts = usage_counts(reported_usage, input_reserve, output_reserve)
+                elif getattr(error, "request_sent", True) is False:
+                    counts = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                              "usage_source": "simulated" if getattr(adapter, "provider_name", None) == "mock" else "estimated"}
+                else:
+                    counts = {"input_tokens": input_reserve, "output_tokens": output_reserve,
+                              "total_tokens": reservation, "usage_source": "estimated"}
+                cost = BaseAIAdapter.calculate_cost(getattr(adapter, "provider_name", "unknown"), model,
+                                                    counts["input_tokens"], counts["output_tokens"])
+                status = "timeout" if isinstance(error, asyncio.TimeoutError) else "cancelled" if isinstance(error, asyncio.CancelledError) else "provider_error"
+            async with self._budget_lock:
+                self.reserved_tokens -= reservation
+                self.tokens_used += counts["total_tokens"]
+                self.usage_by_source[counts["usage_source"]] += counts["total_tokens"]
+                self.total_cost_usd += cost
+                self.total_latency_ms += elapsed
+                self.reservation_overrun_tokens += max(0, counts["total_tokens"] - reservation)
+                if self.tokens_used >= self.budget.token_cap:
+                    self.budget_stopped = True
+                entry.update(counts, status=status, latency_ms=round(elapsed, 2),
+                             cancellation_uncertain=bool(getattr(error, "cancellation_uncertain", False)
+                                                        or (isinstance(error, asyncio.CancelledError) and getattr(adapter, "provider_name", None) != "mock")))
 
     async def execute_board(
         self,
@@ -300,7 +350,9 @@ class ReviewBoardOrchestrator:
                 challenges=challenge_items
             )
             session.combined_review = combined
-            if combined.status in ["failed", "timed_out"] or combined.is_fallback:
+            if self.budget_stopped:
+                session.status = "budget_stopped"
+            elif combined.status in ["failed", "timed_out"] or combined.is_fallback:
                 # Coordinator failed: Mark session explicitly as partial failure
                 session.status = "partial_failure"
             elif self.failures_encountered > 0:
@@ -415,26 +467,21 @@ class ReviewBoardOrchestrator:
                     latency_ms=round(duration_ms, 2)
                 )
 
-            except asyncio.TimeoutError:
-                last_error = f"timeout: Timed out after {self.budget.timeout_seconds}s"
-                duration_ms = (time.perf_counter() - start_t) * 1000
-                if attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap:
-                    return SpecialistFeedback(
-                        specialist_id=specialist.id,
-                        role=specialist.role,
-                        provider=specialist.provider,
-                        model=specialist.model,
-                        is_simulated=(specialist.provider == "mock"),
-                        status="timed_out",
-                        error_message=last_error,
-                        latency_ms=round(duration_ms, 2)
-                    )
-                await asyncio.sleep(0.05)
+            except asyncio.TimeoutError as exc:
+                last_error = f"timeout: Timed out after {self.budget.timeout_seconds}s. {self._error_detail(exc)}"
+                return SpecialistFeedback(
+                    specialist_id=specialist.id, role=specialist.role,
+                    provider=specialist.provider, model=specialist.model,
+                    is_simulated=(specialist.provider == "mock"), status="timed_out",
+                    error_message=last_error,
+                    latency_ms=round((time.perf_counter() - start_t) * 1000, 2),
+                )
 
             except Exception as e:
                 last_error = self._error_detail(e)
                 duration_ms = (time.perf_counter() - start_t) * 1000
-                if attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap:
+                if (attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap
+                        or self.budget_stopped or not getattr(e, "retryable", False)):
                     return SpecialistFeedback(
                         specialist_id=specialist.id,
                         role=specialist.role,
@@ -545,7 +592,8 @@ class ReviewBoardOrchestrator:
                     notify_fn("challenge_exchange", {"item": item.model_dump()})
 
             except BudgetExceededError:
-                raise
+                self.budget_stopped = True
+                break
             except Exception as exc:
                 self.failures_encountered += 1
                 detail = self._error_detail(exc)
@@ -701,5 +749,13 @@ class ReviewBoardOrchestrator:
             "total_cost_usd": round(self.total_cost_usd, 6),
             "calls_made": self.calls_made,
             "budget_stopped": budget_stopped or self.budget_stopped,
-            "failures_encountered": self.failures_encountered
+            "failures_encountered": self.failures_encountered,
+            "reported_tokens": self.usage_by_source["provider_reported"],
+            "estimated_tokens": self.usage_by_source["estimated"],
+            "simulated_tokens": self.usage_by_source["simulated"],
+            "reserved_tokens": self.reserved_tokens,
+            "remaining_tokens": max(0, self.budget.token_cap - self.tokens_used - self.reserved_tokens),
+            "token_overrun": max(0, self.tokens_used - self.budget.token_cap),
+            "reservation_overrun_tokens": self.reservation_overrun_tokens,
+            "provider_attempts": self.attempts
         }
