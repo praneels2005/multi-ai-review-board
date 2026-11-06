@@ -279,9 +279,11 @@ def test_missing_provider_debate_output_cannot_fabricate_an_exchange(boards, mon
     def empty(self, task, system_prompt, user_prompt):
         return {} if task == "challenge_response" else original(self, task, system_prompt, user_prompt)
     monkeypatch.setattr(DeterministicMockAdapter, "_generate_deterministic_content", empty)
-    with pytest.raises(ValueError, match="no grounded response"):
-        asyncio.run(ReviewBoardOrchestrator()._run_multi_step_challenge_round(
-            idea, session.specialist_reviews, {s.id: s for s in panel}))
+    orchestrator = ReviewBoardOrchestrator()
+    result = asyncio.run(orchestrator._run_multi_step_challenge_round(
+        idea, session.specialist_reviews, {s.id: s for s in panel}))
+    assert result == []
+    assert orchestrator.failures_encountered == 2
 
 
 def test_conflicting_measurements_remain_unresolved_downstream(boards):

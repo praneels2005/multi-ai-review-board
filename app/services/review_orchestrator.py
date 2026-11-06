@@ -30,6 +30,7 @@ from app.schemas.review_board_schema import (
 from app.models.connectors.factory import get_provider_adapter
 from app.models.connectors.mock_deliberation import review_context, select_pairs
 from app.models.connectors.base_connector import AITask, NormalizedProviderResponse
+from app.schemas.provider_results import validate_result, ResponseFailure
 
 logger = logging.getLogger(__name__)
 
@@ -359,17 +360,7 @@ class ReviewBoardOrchestrator:
 
                 duration_ms = (time.perf_counter() - start_t) * 1000
 
-                # Validate response structure
-                parsed = response.parsed_json
-                if not parsed or response.error:
-                    raise ValueError(response.error or "Failed to parse structured JSON response from provider")
-
-                # Validate required feedback fields are non-empty
-                required_fields = ["strengths", "risks", "missing_assumptions", "questions"]
-                for fld in required_fields:
-                    val = parsed.get(fld)
-                    if not val or not isinstance(val, list) or len(val) == 0:
-                        raise ValueError(f"Provider response missing required non-empty field '{fld}'")
+                parsed = validate_result("specialist_review", response)
 
                 # Validate evidence citations
                 raw_citations = [str(c).strip().upper() for c in parsed.get("evidence_citations", [])]
@@ -380,9 +371,9 @@ class ReviewBoardOrchestrator:
                 experiment = None
                 if experiment_data and isinstance(experiment_data, dict):
                     experiment = ValidationExperiment(
-                        hypothesis=experiment_data.get("hypothesis", "Hypothesis not articulated"),
-                        test_design=experiment_data.get("test_design", "Test design not provided"),
-                        success_metric=experiment_data.get("success_metric", "Metric not specified")
+                        hypothesis=experiment_data["hypothesis"],
+                        test_design=experiment_data["test_design"],
+                        success_metric=experiment_data["success_metric"]
                     )
 
                 return SpecialistFeedback(
@@ -425,7 +416,7 @@ class ReviewBoardOrchestrator:
                 )
 
             except asyncio.TimeoutError:
-                last_error = f"Timed out after {self.budget.timeout_seconds}s"
+                last_error = f"timeout: Timed out after {self.budget.timeout_seconds}s"
                 duration_ms = (time.perf_counter() - start_t) * 1000
                 if attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap:
                     return SpecialistFeedback(
@@ -441,7 +432,7 @@ class ReviewBoardOrchestrator:
                 await asyncio.sleep(0.05)
 
             except Exception as e:
-                last_error = str(e)
+                last_error = self._error_detail(e)
                 duration_ms = (time.perf_counter() - start_t) * 1000
                 if attempt == max_attempts - 1 or self.calls_made >= self.budget.call_cap:
                     return SpecialistFeedback(
@@ -491,70 +482,78 @@ class ReviewBoardOrchestrator:
             if self.budget_stopped:
                 break
 
-            challenger_spec = panel_map.get(challenger_fb.specialist_id)
-            target_spec = panel_map.get(target_fb.specialist_id)
-            if not challenger_spec or not target_spec:
-                continue
+            try:
+                challenger_spec = panel_map.get(challenger_fb.specialist_id)
+                target_spec = panel_map.get(target_fb.specialist_id)
+                if not challenger_spec or not target_spec:
+                    continue
 
-            # --- STEP A: Challenger generates challenge using Challenger's Adapter ---
-            challenger_adapter = get_provider_adapter(challenger_spec.provider)
-            exchange_context = {
-                "idea": idea.model_dump(),
-                "challenger": review_context(challenger_fb, challenger_spec),
-                "target": review_context(target_fb, target_spec),
-            }
-            step_a_user_prompt = json.dumps(exchange_context, ensure_ascii=False)
-            challenger_res = await self._safe_provider_call(
-                adapter=challenger_adapter,
-                task="challenge_generation",
-                system_prompt=CHALLENGER_SYSTEM_PROMPT,
-                user_prompt=step_a_user_prompt,
-                model=challenger_spec.model,
-                timeout_seconds=self.budget.timeout_seconds
-            )
+                # --- STEP A: Challenger generates challenge using Challenger's Adapter ---
+                challenger_adapter = get_provider_adapter(challenger_spec.provider)
+                exchange_context = {
+                    "idea": idea.model_dump(),
+                    "challenger": review_context(challenger_fb, challenger_spec),
+                    "target": review_context(target_fb, target_spec),
+                }
+                step_a_user_prompt = json.dumps(exchange_context, ensure_ascii=False)
+                challenger_res = await self._safe_provider_call(
+                    adapter=challenger_adapter,
+                    task="challenge_generation",
+                    system_prompt=CHALLENGER_SYSTEM_PROMPT,
+                    user_prompt=step_a_user_prompt,
+                    model=challenger_spec.model,
+                    timeout_seconds=self.budget.timeout_seconds
+                )
 
-            challenger_parsed = challenger_res.parsed_json or {}
-            challenge_point = challenger_parsed.get("challenge_point") or challenger_parsed.get("challenge")
-            if challenger_res.error or not challenge_point:
-                raise ValueError(challenger_res.error or "Challenger returned no grounded challenge")
+                challenger_parsed = validate_result("challenge_generation", challenger_res)
+                challenge_point = challenger_parsed["challenge_point"]
 
-            # --- STEP B: Target Specialist responds using Target's Assigned Adapter ---
-            target_adapter = get_provider_adapter(target_spec.provider)
-            step_b_user_prompt = json.dumps({**exchange_context, "challenge_point": challenge_point}, ensure_ascii=False)
-            target_res = await self._safe_provider_call(
-                adapter=target_adapter,
-                task="challenge_response",
-                system_prompt=TARGET_RESPONSE_SYSTEM_PROMPT,
-                user_prompt=step_b_user_prompt,
-                model=target_spec.model,
-                timeout_seconds=self.budget.timeout_seconds
-            )
+                # --- STEP B: Target Specialist responds using Target's Assigned Adapter ---
+                target_adapter = get_provider_adapter(target_spec.provider)
+                step_b_user_prompt = json.dumps({**exchange_context, "challenge_point": challenge_point}, ensure_ascii=False)
+                target_res = await self._safe_provider_call(
+                    adapter=target_adapter,
+                    task="challenge_response",
+                    system_prompt=TARGET_RESPONSE_SYSTEM_PROMPT,
+                    user_prompt=step_b_user_prompt,
+                    model=target_spec.model,
+                    timeout_seconds=self.budget.timeout_seconds
+                )
 
-            target_parsed = target_res.parsed_json or {}
-            response_text = target_parsed.get("response")
-            reasoning_shift = target_parsed.get("reasoning_adjustment")
-            if target_res.error or not response_text or not reasoning_shift:
-                raise ValueError(target_res.error or "Target returned no grounded response and qualification")
+                target_parsed = validate_result("challenge_response", target_res)
+                response_text = target_parsed["response"]
+                reasoning_shift = target_parsed["reasoning_adjustment"]
 
-            is_sim = (challenger_spec.provider == "mock" and target_spec.provider == "mock")
+                is_sim = (challenger_spec.provider == "mock" and target_spec.provider == "mock")
 
-            item = ChallengeResponseItem(
-                challenger_id=challenger_spec.id,
-                challenger_role=challenger_spec.role,
-                challenger_provider=challenger_spec.provider,
-                target_specialist_id=target_spec.id,
-                target_role=target_spec.role,
-                target_provider=target_spec.provider,
-                target_model=target_spec.model,
-                challenge_point=challenge_point,
-                response=response_text,
-                reasoning_adjustment=reasoning_shift,
-                is_simulated=is_sim
-            )
-            challenge_items.append(item)
+                item = ChallengeResponseItem(
+                    challenger_id=challenger_spec.id,
+                    challenger_role=challenger_spec.role,
+                    challenger_provider=challenger_spec.provider,
+                    target_specialist_id=target_spec.id,
+                    target_role=target_spec.role,
+                    target_provider=target_spec.provider,
+                    target_model=target_spec.model,
+                    challenge_point=challenge_point,
+                    response=response_text,
+                    reasoning_adjustment=reasoning_shift,
+                    is_simulated=is_sim
+                )
+                challenge_items.append(item)
 
-            if notify_fn:
-                notify_fn("challenge_exchange", {"item": item.model_dump()})
+                if notify_fn:
+                    notify_fn("challenge_exchange", {"item": item.model_dump()})
+
+            except BudgetExceededError:
+                raise
+            except Exception as exc:
+                self.failures_encountered += 1
+                detail = self._error_detail(exc)
+                logger.warning("Debate exchange failed: %s", detail)
+                if notify_fn:
+                    notify_fn("challenge_failed", {"challenger_id": challenger_fb.specialist_id,
+                                                "target_specialist_id": target_fb.specialist_id,
+                                                "error": detail})
 
         return challenge_items
 
@@ -589,23 +588,9 @@ class ReviewBoardOrchestrator:
             )
             duration_ms = (time.perf_counter() - start_t) * 1000
 
-            parsed = response.parsed_json or {}
-            if response.error or not parsed.get("summary"):
-                raise ValueError(response.error or "Coordinator returned no synthesis")
-            ev_data = parsed.get("evidence_sufficiency", {})
-            evidence_assessment = EvidenceSufficiencyAssessment(
-                status=ev_data.get("status", "thin"),
-                analysis=ev_data.get("analysis", "Evidence assessment produced by coordinator.")
-            )
-
-            experiments = []
-            for exp in parsed.get("next_experiments", []):
-                if isinstance(exp, dict):
-                    experiments.append(ValidationExperiment(
-                        hypothesis=exp.get("hypothesis", "Hypothesis"),
-                        test_design=exp.get("test_design", "Test"),
-                        success_metric=exp.get("success_metric", "Metric")
-                    ))
+            parsed = validate_result("coordinator_synthesis", response)
+            evidence_assessment = EvidenceSufficiencyAssessment.model_validate(parsed["evidence_sufficiency"])
+            experiments = [ValidationExperiment.model_validate(exp) for exp in parsed["next_experiments"]]
 
             failure_impact = parsed.get("failure_impact_analysis") if failed_specialists else None
             if failed_specialists and not failure_impact:
@@ -625,8 +610,8 @@ class ReviewBoardOrchestrator:
 
             return CoordinatorCombinedReview(
                 summary=(f"[{provenance}; provider={response.provider}; model={response.model}] {parsed['summary']}"),
-                priorities=parsed.get("priorities", []),
-                disagreements=parsed.get("disagreements", []),
+                priorities=parsed["priorities"],
+                disagreements=parsed["disagreements"],
                 next_experiments=experiments,
                 evidence_sufficiency=evidence_assessment,
                 failure_impact_analysis=failure_impact,
@@ -680,9 +665,10 @@ class ReviewBoardOrchestrator:
             )
 
         except Exception as e:
+            error_detail = self._error_detail(e)
             duration_ms = (time.perf_counter() - start_t) * 1000
             return CoordinatorCombinedReview(
-                summary=f"[COORDINATOR FAILED] Coordinator synthesis failed due to an execution error: {str(e)}",
+                summary=f"[COORDINATOR FAILED] Coordinator synthesis failed due to an execution error: {error_detail}",
                 priorities=["Review completed specialist feedback directly."],
                 disagreements=[],
                 next_experiments=[],
@@ -690,12 +676,22 @@ class ReviewBoardOrchestrator:
                     status="insufficient",
                     analysis="Coordinator evaluation encountered an execution error."
                 ),
-                failure_impact_analysis=f"Coordinator encountered an error ({str(e)}). This is an explicit fallback report.",
+                failure_impact_analysis=f"Coordinator encountered an error ({error_detail}). This is an explicit fallback report.",
                 disclaimer="Decision support only. Not an investment recommendation.",
                 is_fallback=True,
                 status="failed",
                 latency_ms=round(duration_ms, 2)
             )
+
+    @staticmethod
+    def _error_detail(error):
+        from app.config.settings import settings
+        from app.models.connectors.base_connector import BaseAIAdapter
+        detail = BaseAIAdapter.sanitize_api_keys(str(error), settings.openai_api_key, settings.gemini_api_key)
+        if isinstance(error, ResponseFailure):
+            return detail
+        return f"{'timeout' if isinstance(error, asyncio.TimeoutError) else 'provider_error'}: {detail}"
+
 
     def _build_execution_summary(self, budget_stopped: bool = False) -> Dict[str, Any]:
         """Produce the aggregated execution summary."""

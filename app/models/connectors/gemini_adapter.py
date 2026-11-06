@@ -79,10 +79,9 @@ class GeminiAdapter(BaseAIAdapter):
             total_tokens = in_tokens + out_tokens
             cost = self.calculate_cost(self.provider_name, active_model, in_tokens, out_tokens)
 
-            try:
-                parsed = json.loads(self.clean_json_string(raw_text))
-            except Exception:
-                parsed = None
+            # Sanitize before parsing so neither structured results nor raw text leak keys.
+            raw_text = self.sanitize_api_keys(raw_text, self.api_key)
+            parsed, parse_error = self.parse_output(raw_text, task)
 
             return NormalizedProviderResponse(
                 raw_text=self.sanitize_api_keys(raw_text, self.api_key),
@@ -95,7 +94,7 @@ class GeminiAdapter(BaseAIAdapter):
                 output_tokens=out_tokens,
                 total_tokens=total_tokens,
                 cost_estimate_usd=cost,
-                error=None if parsed else "Failed to parse JSON response"
+                error=parse_error
             )
 
         except asyncio.TimeoutError:

@@ -100,6 +100,21 @@ class BaseAIAdapter(ABC):
         output_cost = (output_tokens / 1_000_000.0) * rate[1]
         return round(input_cost + output_cost, 6)
 
+    @classmethod
+    def parse_output(cls, raw_text, task):
+        """Separate syntax errors from valid JSON with the wrong top-level shape."""
+        try:
+            parsed = json.loads(cls.clean_json_string(raw_text))
+        except (ValueError, TypeError):
+            return None, "malformed_json: Malformed JSON response"
+        if not isinstance(parsed, dict):
+            return None, "schema_validation: Expected a JSON object"
+        from app.schemas.provider_results import validate_payload, ResponseFailure
+        try:
+            return validate_payload(task, parsed), None
+        except ResponseFailure as exc:
+            return parsed, str(exc)
+
     @staticmethod
     def clean_json_string(text: str) -> str:
         """Extract and clean valid JSON from raw LLM output."""
@@ -116,7 +131,7 @@ class BaseAIAdapter(ABC):
         """Strip sensitive API keys from strings to protect logs and responses."""
         sanitized = text
         for key in keys:
-            if key and len(key) > 5:
+            if key:
                 sanitized = sanitized.replace(key, "[REDACTED_API_KEY]")
         return sanitized
 

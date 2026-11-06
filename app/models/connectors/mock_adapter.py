@@ -55,7 +55,7 @@ class DeterministicMockAdapter(BaseAIAdapter):
                 output_tokens=30,
                 total_tokens=180,
                 cost_estimate_usd=self.calculate_cost(self.provider_name, active_model, 150, 30),
-                error="Malformed JSON response from mock provider"
+                error="malformed_json: Malformed JSON response from mock provider"
             )
 
         # Realistic simulated network latency (150ms to 350ms)
@@ -64,6 +64,7 @@ class DeterministicMockAdapter(BaseAIAdapter):
         # Generate deterministic response based on prompt contents
         parsed_data = self._generate_deterministic_content(task, system_prompt, user_prompt)
         raw_text = json.dumps(parsed_data, indent=2)
+        parsed_data, output_error = self.parse_output(raw_text, task)
 
         latency = (time.perf_counter() - start_time) * 1000
         input_tokens = len(system_prompt + user_prompt) // 4
@@ -82,7 +83,7 @@ class DeterministicMockAdapter(BaseAIAdapter):
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             cost_estimate_usd=cost,
-            error=None
+            error=output_error
         )
 
     def _generate_deterministic_content(
