@@ -654,7 +654,7 @@ Respond to this challenge:
                         success_metric=exp.get("success_metric", "Metric")
                     ))
 
-            failure_impact = parsed.get("failure_impact_analysis")
+            failure_impact = parsed.get("failure_impact_analysis") if failed_specialists else None
             if failed_specialists and not failure_impact:
                 missing_roles = ", ".join([f.role for f in failed_specialists])
                 failure_impact = (
