@@ -7,9 +7,11 @@ tracks token usage, and calculates real API costs.
 import asyncio
 import json
 import time
+import httpx
 from typing import Optional, Dict, Any
 from app.config.settings import settings
-from app.models.connectors.base_connector import BaseAIAdapter, NormalizedProviderResponse
+from app.models.connectors.base_connector import AITask, BaseAIAdapter, NormalizedProviderResponse
+from app.models.connectors.execution_usage import ProviderCallError, ProviderTimeoutError, usage_counts, exception_usage, conservative_tokens
 
 
 class OpenAIAdapter(BaseAIAdapter):
@@ -22,9 +24,17 @@ class OpenAIAdapter(BaseAIAdapter):
         if self.api_key:
             try:
                 from openai import AsyncOpenAI
-                self._client = AsyncOpenAI(api_key=self.api_key)
+                self._client = AsyncOpenAI(api_key=self.api_key, max_retries=0)
             except ImportError:
                 self._client = None
+
+    def check_configuration(self):
+        super().check_configuration()
+        if not self.api_key or not self._client:
+            raise ValueError(
+                "OpenAI API key not configured or client library unavailable. "
+                "Configure OPENAI_API_KEY in .env or switch to the Deterministic Mock provider."
+            )
 
     async def call(
         self,
@@ -34,15 +44,14 @@ class OpenAIAdapter(BaseAIAdapter):
         timeout_seconds: float = 15.0,
         temperature: float = 0.2,
         simulate_failure: Optional[str] = None,
+        *,
+        task: AITask = "specialist_review",
+        max_output_tokens: int = 4096,
     ) -> NormalizedProviderResponse:
         active_model = model or "gpt-4o-mini"
         start_time = time.perf_counter()
 
-        if not self.api_key or not self._client:
-            raise ValueError(
-                "OpenAI API key not configured or client library unavailable. "
-                "Configure OPENAI_API_KEY in .env or switch to the Deterministic Mock provider."
-            )
+        self.check_configuration()
 
         # Prompt injection defense: treat input data safely
         safe_user_prompt = self.sanitize_prompt_data(user_prompt)
@@ -60,28 +69,26 @@ class OpenAIAdapter(BaseAIAdapter):
                 model=active_model,
                 messages=messages,
                 temperature=temperature,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                timeout=timeout_seconds,
+                max_completion_tokens=max_output_tokens
             )
             return response
 
         try:
             # Enforce per-call timeout
-            response = await asyncio.wait_for(_make_api_call(), timeout=timeout_seconds)
+            response = await self.bounded_request(_make_api_call(), timeout_seconds)
             raw_text = response.choices[0].message.content or "{}"
             latency = (time.perf_counter() - start_time) * 1000
 
-            # Usage tracking
-            usage = response.usage
-            in_tokens = usage.prompt_tokens if usage else len(system_prompt + user_prompt) // 4
-            out_tokens = usage.completion_tokens if usage else len(raw_text) // 4
-            total_tokens = usage.total_tokens if usage else in_tokens + out_tokens
+            counts = usage_counts(response.usage, self.estimate_input_tokens(system_prompt, user_prompt), conservative_tokens(raw_text))
+            in_tokens, out_tokens, total_tokens = (counts[k] for k in ("input_tokens", "output_tokens", "total_tokens"))
 
             cost = self.calculate_cost(self.provider_name, active_model, in_tokens, out_tokens)
 
-            try:
-                parsed = json.loads(self.clean_json_string(raw_text))
-            except Exception as parse_err:
-                parsed = None
+            # Sanitize before parsing so neither structured results nor raw text leak keys.
+            raw_text = self.sanitize_api_keys(raw_text, self.api_key)
+            parsed, parse_error = self.parse_output(raw_text, task)
 
             return NormalizedProviderResponse(
                 raw_text=self.sanitize_api_keys(raw_text, self.api_key),
@@ -94,12 +101,21 @@ class OpenAIAdapter(BaseAIAdapter):
                 output_tokens=out_tokens,
                 total_tokens=total_tokens,
                 cost_estimate_usd=cost,
-                error=None if parsed else "Failed to parse JSON response"
+                usage_source=counts["usage_source"],
+                usage_breakdown_estimated=counts["usage_breakdown_estimated"],
+                error=parse_error
             )
 
-        except asyncio.TimeoutError:
-            raise asyncio.TimeoutError(f"OpenAI call to {active_model} timed out after {timeout_seconds}s")
+        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+            raise ProviderTimeoutError(
+                f"Openai call to {active_model} timed out after {timeout_seconds}s; local await cancelled, remote completion and billing are unknown",
+                usage=exception_usage(exc),
+            ) from None
         except Exception as e:
+            # SDK timeout types need not inherit asyncio.TimeoutError.
+            if e.__class__.__name__ == "APITimeoutError":
+                raise ProviderTimeoutError(f"Openai request timed out; remote completion and billing are unknown", usage=exception_usage(e)) from None
             sanitized_err = self.sanitize_api_keys(str(e), self.api_key)
-            raise RuntimeError(f"OpenAI API Error: {sanitized_err}")
-
+            status = getattr(e, "status_code", getattr(e, "code", None))
+            raise ProviderCallError(f"Openai API Error: {sanitized_err}",
+                                    retryable=(status == 429), usage=exception_usage(e)) from None

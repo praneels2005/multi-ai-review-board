@@ -5,11 +5,17 @@ cost calculators, and prompt sanitization defenses.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, Type
+from typing import Optional, Dict, Any, Type, Literal
 import json
 import re
 import time
 from pydantic import BaseModel, Field
+
+
+AITask = Literal[
+    "panel_generation", "specialist_review", "challenge_generation",
+    "challenge_response", "coordinator_synthesis",
+]
 
 
 class NormalizedProviderResponse(BaseModel):
@@ -20,10 +26,12 @@ class NormalizedProviderResponse(BaseModel):
     model: str
     is_simulated: bool
     latency_ms: float
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
     cost_estimate_usd: float = 0.0
+    usage_source: Literal["provider_reported", "estimated", "simulated"] = "estimated"
+    usage_breakdown_estimated: bool = False
     error: Optional[str] = None
 
 
@@ -40,9 +48,33 @@ class BaseAIAdapter(ABC):
         timeout_seconds: float = 15.0,
         temperature: float = 0.2,
         simulate_failure: Optional[str] = None,
+        *,
+        task: AITask = "specialist_review",
+        max_output_tokens: int = 4096,
     ) -> NormalizedProviderResponse:
-        """Execute a call to the underlying provider and return a normalized response."""
+        """Execute a caller-selected task and return a normalized response.
+
+        Task is internal routing metadata, never inferred from prompt content.
+        Live adapters use the supplied prompts; mock uses task to select its generator.
+        The default preserves existing standalone specialist-review callers.
+        """
         pass
+
+    def check_configuration(self):
+        """Fail locally before reserving a provider attempt, if misconfigured."""
+        if any(not task.done() for task in getattr(self, "_pending_requests", ())):
+            raise ValueError("Previous SDK request has not finished cancellation; no duplicate request was dispatched")
+
+    async def bounded_request(self, awaitable, timeout):
+        from app.models.connectors.execution_usage import bounded_await
+        if not hasattr(self, "_pending_requests"):
+            self._pending_requests = set()
+        return await bounded_await(awaitable, timeout, pending=self._pending_requests)
+
+
+    def estimate_input_tokens(self, system_prompt, user_prompt):
+        from app.models.connectors.execution_usage import conservative_tokens
+        return conservative_tokens(system_prompt + self.sanitize_prompt_data(user_prompt))
 
     @staticmethod
     def sanitize_prompt_data(raw_text: str) -> str:
@@ -87,6 +119,21 @@ class BaseAIAdapter(ABC):
         output_cost = (output_tokens / 1_000_000.0) * rate[1]
         return round(input_cost + output_cost, 6)
 
+    @classmethod
+    def parse_output(cls, raw_text, task):
+        """Separate syntax errors from valid JSON with the wrong top-level shape."""
+        try:
+            parsed = json.loads(cls.clean_json_string(raw_text))
+        except (ValueError, TypeError):
+            return None, "malformed_json: Malformed JSON response"
+        if not isinstance(parsed, dict):
+            return None, "schema_validation: Expected a JSON object"
+        from app.schemas.provider_results import validate_payload, ResponseFailure
+        try:
+            return validate_payload(task, parsed), None
+        except ResponseFailure as exc:
+            return parsed, str(exc)
+
     @staticmethod
     def clean_json_string(text: str) -> str:
         """Extract and clean valid JSON from raw LLM output."""
@@ -103,7 +150,7 @@ class BaseAIAdapter(ABC):
         """Strip sensitive API keys from strings to protect logs and responses."""
         sanitized = text
         for key in keys:
-            if key and len(key) > 5:
+            if key:
                 sanitized = sanitized.replace(key, "[REDACTED_API_KEY]")
         return sanitized
 
