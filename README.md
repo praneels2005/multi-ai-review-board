@@ -33,6 +33,26 @@ React + Vite
 
 Implementation: [orchestrator](app/services/review_orchestrator.py), [response contracts](app/schemas/review_board_schema.py), [run ownership](app/services/review_runs.py), and [session storage](app/services/session_store.py).
 
+## Offline Specialist Panel Selection
+
+The deterministic mock uses a shared [library of 18 specialist archetypes](app/models/connectors/mock_archetypes.py), each with explicit trigger terms, a role, expertise, a mandate template, and a review perspective covering risks, assumptions, questions, and validation experiments. The library includes the original developer-tool, refill-commerce, and sleep-hardware perspectives plus financial controls, learning outcomes, carbon-credit integrity, dental operations, agriculture, privacy, and document retrieval.
+
+Panel selection uses structured idea fields and case-insensitive **whole-word matching** (`\bterm\b`), including bounded phrases. For example, `capital` and `rapid` do not match `api`, and `healthy` does not match `health`. Explicit variants are listed in the library; there is no stemming or semantic classification.
+
+| Idea field | Weight per distinct matching trigger in that field |
+| --- | ---: |
+| Title | 4 |
+| Proposed solution | 4 |
+| Idea description | 2 |
+| Problem | 2 |
+| Target customer | 1 |
+
+An archetype must match **at least two distinct trigger terms**, including **at least one domain anchor**, to qualify. The anchor gate prevents supporting terms such as `practice` and `claims` from selecting a dental specialist for a legal-service idea. Repeating one term cannot satisfy the two-term threshold or inflate its score within a field. Supplied evidence does not select panel archetypes or alter these field weights.
+
+Up to five highest-scoring qualifying archetypes are selected, with deterministic ties and canonical presentation order. If fewer than three qualify, generic customer-discovery, delivery-feasibility, and commercial-viability roles pad the panel to three as needed. Their rationales carry **`[EXPLICIT MOCK FALLBACK]`**; qualifying roles show **`[MOCK KEYWORD MATCH: …]`** with matched terms and scores. These labels describe bounded lexical matching, not calibrated confidence or independently established expertise.
+
+Specialist feedback uses the same whole-word matcher. Mandate matches take priority over role and expertise, so a substantive mandate edit can change the risks, questions, and experiment. Non-preset regressions cover fintech, edtech, carbon credits, dental SaaS, and agriculture, including substantively different assessments. Unknown domains receive explicit generic fallbacks rather than fabricated specialist knowledge.
+
 ## Provider Abstraction & Evidence Handling
 
 The shared connector interface uses explicit task identifiers for panel generation, specialist review, challenge generation, challenge response, and coordinator synthesis. User-entered keywords cannot select an operation. Responses undergo JSON parsing and task-specific schema validation; malformed or incomplete output is recorded as failure rather than filled with fabricated assessments. Panel generation has an explicit fallback panel; coordinator failure produces explicitly marked fallback guidance.
@@ -43,7 +63,7 @@ The shared connector interface uses explicit task identifiers for panel generati
 | `openai` | `gpt-4o-mini` | Asynchronous OpenAI adapter; requires a backend key. |
 | `gemini` | `gemini-1.5-flash` | Native asynchronous Google GenAI adapter; requires a backend key. |
 
-These are names configured in the source, **not verified statements of current live model availability**. Specialist model names are editable; provider switching updates provider and model together. Gemini's settings fallback is `gemini-3.5-flash-lite` when no explicit model is supplied; normal UI selection supplies its own model. Cost estimates use a local pricing table and are not authoritative billing quotes.
+These are names configured in the source, **not verified statements of current live model availability**. Specialist model names are editable; provider switching updates provider and model together. Gemini's settings fallback is `gemini-3.5-flash-lite` when no explicit model is supplied; normal UI selection supplies its own model. Cost estimates use a local pricing table and are not authoritative billing quotes. The UI labels dollar amounts as **Est. cost**. Run totals expose reported, estimated, and simulated token counts when available; older saved sessions without the breakdown show that the usage source is unavailable. Specialist cards label mock tokens as simulated and live-provider tokens as reported/estimated because that per-card contract does not preserve exact usage provenance.
 
 Mock specialist feedback uses role, expertise, mandate, startup context, and actual supplied evidence text. Bounded rules distinguish domain risks and experiments and respond to supported evidence mutations, such as an unfavorable CPU-overhead measurement. This is not a general-purpose semantic inference engine.
 
@@ -175,17 +195,16 @@ The [local demo runbook](docs/LOCAL_DEMO_RUNBOOK.md) uses additional precautions
 
 ## Testing & Verification
 
-**Reported automated verification — November 6, 2026**, application baseline `9e79d12da9d700518ad052b13f0f71d089f3936e`:
 
-| Check | Reported result |
+| Check | Verified result |
 | --- | --- |
-| Backend pytest suite | **297 passed**; two existing third-party deprecation warnings. |
-| Frontend regression tests | **7 passed**. |
+| Backend pytest suite | **335 passed**; two existing third-party deprecation warnings. |
+| Frontend regression tests | **11 passed**. |
 | Deterministic offline demo behavioral checks | **53/53 passed** across DevPulse, GlowGreen, and QuantumSleep. |
 | TypeScript check | Passed. |
 | Vite production build | Passed. |
 
-The [verification report](docs/DEMO_VERIFICATION_RESULTS.md) records environment versions, artifacts, counts, and limits. The demo verifier exercises actual API/orchestration/persistence paths through `TestClient` and forbids live adapter calls. It checks specialist differentiation, grounded debate/priorities/experiments, evidence limitations, saved-result retrieval, and zero additional calls on identified replay. Existing suites cover reconnection, idempotency, failures, retries, timeouts, and budgets.
+The backend suite includes **38 archetype regressions** covering substring collisions, five non-preset domains, weighted scoring, distinct-term thresholds, domain anchors, explicit generic padding, mandate sensitivity, and deterministic output. Frontend tests include both preset/recovery response orders, fresh default initialization, visible usage/cost labels, provider/model pairing, and stream recovery. Verification used the existing installed environment without paid provider calls; a fresh dependency installation was not tested.
 
 Reproduce from the repository root with the virtual environment activated:
 
@@ -215,7 +234,7 @@ npm run build
 - Interrupted provider operations are not resumed automatically. Remote completion/cancellation may be unknown; there is no exactly-once remote execution or billing guarantee.
 - Sessions use an existing unauthenticated, application-wide namespace intended for **trusted local use**.
 - Evidence is text supplied by the user; there is no independent external evidence verification. A valid citation or agreement between specialists is not proof.
-- Mock behavior is deterministic and bounded; role/evidence handling does not provide general semantic understanding. Recommendations and proposed experiments are decision support, not validated market or clinical findings.
+- Mock behavior is deterministic and bounded. Its 18 archetypes require explicit whole-word triggers and a domain anchor; absent vocabulary, negation, or ambiguous context can still produce incomplete or inappropriate matches. Generic fallbacks disclose insufficient domain coverage. Role/evidence handling does not provide general semantic understanding. Recommendations and proposed experiments are decision support, not validated market or clinical findings.
 - Live provider/model availability and fresh dependency installations were not validated by the reported offline tests. Manual browser recovery remains to be verified after the preset-loading race fix.
 
 ## Technical & Research Sources
