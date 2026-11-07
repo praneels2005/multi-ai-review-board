@@ -1,56 +1,53 @@
-# Deterministic mock demo — Antigravity manual runbook
+# Deterministic mock demo — manual demo runbook
 
-**Manual acceptance status: NOT RUN.** Codex exercised the API/test harness, not Antigravity or a browser. Complete the checklist below and confirm the outcomes before treating manual acceptance as complete. Automated evidence is summarized in [DEMO_VERIFICATION_RESULTS.md](DEMO_VERIFICATION_RESULTS.md).
+**Manual acceptance status: 12 worksheet scenarios observed passing in a local browser on November 7, 2026, including the documented offline/reopen variant; abrupt backend restart was blocked.** The acceptance worksheet below separates observed passes from scenarios still requiring verification. Automated results and their application baseline are recorded in the [root README](../README.md#testing--verification). Passing automated tests does not sign off browser behavior. Final acceptance still requires reviewer confirmation; these observations are not a complete acceptance sign-off.
 
 ## 1. Open the project and start the services
 
-Open this folder as the project in Antigravity:
+`<repo-root>` below means your local checkout of `multi-ai-review-board`; replace it with that directory. Run all backend commands from this directory so session storage resolves consistently. Use a terminal and your browser; no particular editor is required.
 
-```text
-/Users/praneelpothukanuri/Documents/Codex/2026-11-02/github-plugin-github-openai-curated-remote/work/multi-ai-review-board
-```
+The automated application baseline is `b7ed1e8f1cd96b8737596c892541460418825301` on `fix/review-board-reliability`. Run `git status --short --branch` and `git rev-parse HEAD` to record the checkout being demonstrated. Later documentation-only commits do not change that tested application baseline.
 
-The verified application baseline is `9e79d12` on `fix/review-board-reliability`. Run `git status --short --branch` to confirm your current state. The new verification script and documentation may be uncommitted; switching to a clean checkout that lacks them will not reproduce those deliverables.
-
-### Terminal A — backend, existing workstation environment
+### One-time setup
 
 ```bash
-cd "/Users/praneelpothukanuri/Documents/Codex/2026-11-02/github-plugin-github-openai-curated-remote/work/multi-ai-review-board"
-source ../review-venv/bin/activate
+cd "<repo-root>"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Fresh dependency installation was not performed for the recorded verification. Backend requirements are unpinned; use the README prerequisites and record resolved versions when reproducing.
+
+### Terminal A — backend
+
+```bash
+cd "<repo-root>"
+source .venv/bin/activate
 printf 'Local demo backend PID: %s\n' "$$"
 exec env OPENAI_API_KEY= GEMINI_API_KEY= ANTHROPIC_API_KEY= GROQ_API_KEY= XAI_API_KEY= SERPER_API_KEY= SERPAPI_API_KEY= \
   python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
 ```
 
-Keep the printed PID for the interrupted-process scenario. `exec` replaces this terminal's shell; after stopping the backend, open a new terminal and repeat these commands. Do not use `--reload` for this demo: code edits could otherwise interrupt a run and a reloader introduces an additional process.
+Keep the printed PID for the interrupted-process scenario. `exec` replaces this terminal's shell; after stopping the backend, open a new terminal and repeat these commands. Do not use `--reload` for this demo: code edits could interrupt a run and a reloader introduces an additional process.
 
-No existing `.env` file is overwritten. The explicit empty environment values override keys loaded from `.env` for this demo process. A legacy startup message saying that no live LLM provider was initialized does not prevent the review-board mock route from working. Do not set `LLM_PROVIDER=mock`: that legacy setting does not accept `mock`; select mock through the review-board controls below.
-
-For a fresh checkout without the existing sibling environment, first run:
-
-```bash
-cd "/Users/praneelpothukanuri/Documents/Codex/2026-11-02/github-plugin-github-openai-curated-remote/work/multi-ai-review-board"
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-Then use `source .venv/bin/activate` instead of the sibling environment in Terminal A. Fresh dependency installation was not performed for this verification. Backend requirements are not pinned; the tested versions are recorded in the automated report/artifacts.
+No existing `.env` file is overwritten. The explicit empty environment values override keys loaded from `.env` for this process. A legacy startup message saying that no live LLM provider was initialized does not prevent review-board mock operation. Do not set `LLM_PROVIDER=mock`: that separate legacy setting does not accept `mock`; select mock through the review-board controls below.
 
 ### Terminal B — frontend
 
 ```bash
-cd "/Users/praneelpothukanuri/Documents/Codex/2026-11-02/github-plugin-github-openai-curated-remote/work/multi-ai-review-board/frontend"
+cd "<repo-root>/frontend"
 npm ci
 npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-Use `http://localhost:5173` in Antigravity's browser/preview or an external browser. Use that **same origin** for every tab; do not mix `localhost` and `127.0.0.1` frontend URLs, since their browser storage differs. The frontend calls `http://localhost:8000`. If the preview lacks network inspection/request blocking, use an external Chromium browser with DevTools for the network scenarios.
+Open `http://localhost:5173` in your browser. Use that **same origin** for every tab; do not mix `localhost` and `127.0.0.1` frontend URLs, since their browser storage differs. The frontend calls `http://localhost:8000`. Use a browser with DevTools network inspection and request blocking for the network scenarios.
 
 ### Terminal C — health and inspection
 
 ```bash
-cd "/Users/praneelpothukanuri/Documents/Codex/2026-11-02/github-plugin-github-openai-curated-remote/work/multi-ai-review-board"
-source ../review-venv/bin/activate
+cd "<repo-root>"
+source .venv/bin/activate
 curl --fail --silent http://127.0.0.1:8000/health
 ```
 
@@ -150,7 +147,7 @@ Normal mock runs take only about 1–2 seconds. Use the existing failure simulat
 
 **Fail:** refresh initiates a new run, resets the ledger, loses completed results, or reports the timed-out specialist as successful. Inspect Network, saved JSON and `run_metadata`.
 
-**Specific manual check:** preset loading and active-run recovery are separate mount effects. A late preset response can potentially reset the recovered view through `applyPreset`. The helper-level frontend tests do not cover real mount/network ordering. Verify the recovered idea, panel and displayed session remain correct. If they reset/disappear, record a manual failure even if the backend run is intact; do not treat automated helper tests as UI acceptance. This is a source-level risk, not a browser-reproduced result from Codex.
+**Specific manual check:** preset loading must not replace a recovered idea, panel or session. The current implementation skips automatic default-preset application when recovering a remembered run. Regression tests cover both response orders through a hook harness; check the actual restored browser view as well. Record a failure if the view resets even when backend results remain intact.
 
 ## 5. Stream interruption and reconnection
 
@@ -182,7 +179,7 @@ Leave `POST /runs` and `GET /sessions/{id}` unblocked. Start once and record the
 
 **Expected UI:** both tabs display the same persisted run; tab B only reads/subscribes. One tab's disconnection does not cancel execution. For a completed run, reopening is GET-only.
 
-**Pass:** identical session IDs, outputs and final ledger in both tabs; a single start across the two tabs; no duplicate provider attempts. **Fail:** tab B starts a workflow or its results use a different ID. Inspect Network in both tabs and the common saved JSON. Do not click Run Review Board in tab B to attach; that button explicitly requests a new run. Also check the mount-order risk from scenario 4.
+**Pass:** identical session IDs, outputs and final ledger in both tabs; a single start across the two tabs; no duplicate provider attempts. **Fail:** tab B starts a workflow or its results use a different ID. Inspect Network in both tabs and the common saved JSON. Do not click Run Review Board in tab B to attach; that button explicitly requests a new run. Also check the restored idea and panel as described in scenario 4.
 
 ## 7. Explicitly rerun a completed review
 
@@ -252,7 +249,7 @@ The explicit empty keys on the pytest command also protect legacy tests that oth
 In the frontend terminal after stopping Vite, or a separate terminal:
 
 ```bash
-cd "/Users/praneelpothukanuri/Documents/Codex/2026-11-02/github-plugin-github-openai-curated-remote/work/multi-ai-review-board/frontend"
+cd "<repo-root>/frontend"
 node --test tests/*.test.cjs
 npm run build
 npx tsc --noEmit
@@ -260,24 +257,24 @@ npx tsc --noEmit
 
 **Pass:** verifier exits 0 with all three presets passing; tests/build/typecheck exit 0. **Fail:** any nonzero exit or paid-provider selection. Save the output and exact commit. These are automated checks; they do not sign off the manual scenarios above.
 
-## Acceptance worksheet — developer fills this in
+## Acceptance worksheet
 
-Every row is **pending** until you execute it. Record session IDs and any failures; do not infer a UI pass from the automated report.
+Recorded results below apply only to the observed local browser session on November 7, 2026, at documentation checkout `8f8b795` (application code baseline `b7ed1e8`). Recheck them for your interview environment. Rows marked **Blocked** or **Not run** are outstanding; do not infer a pass from automated tests.
 
-| Scenario | Developer result | Session ID / notes |
+| Scenario | Observed result | Session ID / notes |
 | --- | --- | --- |
-| Startup and mock-only configuration | Pending | |
-| DevPulse review/debate/synthesis/save/reopen | Pending | |
-| GlowGreen review/debate/synthesis/save/reopen | Pending | |
-| QuantumSleep evidence limitations/save/reopen | Pending | |
-| Refresh active review, including correct restored form/view | Pending | |
-| Stream-only blocking and GET polling | Pending | |
-| Full offline interval, then refresh recovery | Pending | |
-| Two tabs, same run | Pending | |
-| Explicit rerun and preserved lineage | Pending | |
-| Simulated failure and surviving findings | Pending | |
-| Token exhaustion; optional partial call-cap stop | Pending | |
-| Side-effect-free saved-result reads | Pending | |
-| Abrupt backend restart and conservative interrupted status | Pending | |
+| Startup and mock-only configuration | Pass | Local browser loaded; all generated specialists remained mock. |
+| DevPulse review/debate/synthesis/save/reopen | Pass | Four distinct reviews, two exchanges, synthesis and saved reopening passed. `937378b1-3c9f-4fd7-92e9-08e2ffe33fa5` |
+| GlowGreen review/debate/synthesis/save/reopen | Pass | Four distinct reviews, two exchanges, synthesis and saved reopening passed. `de63fde5-f056-4562-9414-8bc489ad5d81` |
+| QuantumSleep evidence limitations/save/reopen | Pass | Three distinct reviews, one exchange, clinical uncertainty; reopened saved review. `62c3ab1b-e817-4290-bdcf-c5951a6626f8` |
+| Refresh active review, including correct restored form/view | Pass | Restored idea, panel and partial findings; timeout run finished with seven attempts. `3858e723-a954-4550-815a-8737e86c8721` |
+| Stream-only blocking and GET polling | Pass | Native DevTools showed one affected request under a stream-only blocking rule; snapshot polling retained findings and reached seven attempts. `06d26fff-e84f-49a1-986e-33ca332faf87` |
+| Full offline interval, then refresh recovery | Pass (recorded variant) | Browser showed `ERR_INTERNET_DISCONNECTED`. After restoring Online and refreshing, the completed run was reopened from Saved Reviews with seven attempts. The other tab had cleared the active key when it finished. `2ca2acd3-5719-4bf3-81d1-ad5a3ef5c7ea` |
+| Two tabs, same run | Pass | Both showed the controlled run and identical final partial-failure totals; one ledger with seven attempts. `3858e723-a954-4550-815a-8737e86c8721` |
+| Explicit rerun and preserved lineage | Pass | Child `76c9e716-490f-4377-b33b-1083fd220aed`, six attempts, parent retained. |
+| Simulated failure and surviving findings | Pass | Explicit infrastructure failure, three surviving reviews, seven attempts and failure-impact warning. `7156990d-0912-4574-92c3-f56f54bee690` |
+| Token exhaustion; optional partial call-cap stop | Pass (token scenario) | Zero attempts/tokens; saved `budget_stopped`. `d93b0b0f-4a1b-4b20-851c-23157b7b83d2`. Optional call-cap scenario not run. |
+| Side-effect-free saved-result reads | Pass | Reopened completed, partial-failure and budget-stopped runs; all seven recorded session file hashes remained unchanged. |
+| Abrupt backend restart and conservative interrupted status | Blocked | Verified local worker and in-flight checkpoint, but the execution sandbox rejected the signal with `Operation not permitted`. No process restart occurred; this is not a passed browser test. |
 
-Browser-specific request blocking, Antigravity preview behavior, visual layout and real browser lifecycle ordering were not exercised by Codex. If DevTools or process signaling is unavailable in your environment, mark those scenarios **not run/unavailable**, and use an external browser/local terminal if permitted. Real provider billing/cancellation and remote exactly-once behavior cannot be demonstrated by a mock-only run and are not claimed here.
+The recorded follow-up exercised stream-only blocking and full offline toggling through native browser DevTools. The interrupted-process scenario remains outstanding because the sandbox rejected the worker signal. Run it from a local terminal against a dedicated demo process before final acceptance. The optional partial call-cap scenario also remains unrun. Real provider billing/cancellation and remote exactly-once behavior cannot be demonstrated by a mock-only run and are not claimed here.

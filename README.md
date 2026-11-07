@@ -27,7 +27,7 @@ React + Vite
 
 - **Panel generation:** generates 3–5 specialists with roles, expertise, mandates, and rationales; users can inspect and edit the panel before execution.
 - **Independent reviews:** each specialist sees the idea and supplied evidence, without peer reviews. Outputs include strengths, risks, missing assumptions, questions, evidence citations, assumptions/unknowns, and a validation experiment with a hypothesis, test design, and success metric.
-- **Bounded debate:** one challenge-and-response round, with up to two exchanges for a four-specialist panel and one for a three-specialist panel. Failed reviews and budget limits can reduce participation. Challenges use actual findings; complementary risks are not automatically disagreements or consensus.
+- **Bounded debate:** one challenge-and-response round, with up to two exchanges for four or five successfully completed specialist reviews, one for two or three, and none for fewer than two. Failures and budget limits can reduce or prevent exchanges. Challenges use actual findings; complementary risks are not automatically disagreements or consensus.
 - **Coordinator synthesis:** combines available reviews and exchanges into priorities, disagreements, experiments, evidence sufficiency, and failure impact when applicable. The current coordinator always uses the **mock adapter**, including when specialists use live providers. Output provenance identifies this.
 - **Persistence:** saved sessions retain findings, exchanges, synthesis, configuration, lineage, and execution accounting under `data/saved_reviews/`.
 
@@ -125,7 +125,7 @@ Compatibility routes `/api/review-board/run` and `/api/review-board/run-stream` 
 
 Execution is owned by a server task, so browser refreshes and disconnected HTTP streams do not cancel it. The frontend remembers the active identifier and recovers existing state through GET requests. Broken streams fall back to snapshot polling rather than another provider workflow. If full network loss also breaks polling, the observer may stop with an error; restore connectivity and refresh/reopen the session. Automatic resubscription on a browser Online event is not implemented.
 
-Manual browser acceptance remains pending. Default preset initialization is skipped when a remembered run is being recovered, so a late preset response does not clear restored state. Regression tests exercise both preset/recovery response orders through the application hook harness; actual browser refresh behavior still requires the runbook checks.
+Local browser checks on November 7, 2026 passed for all three presets, saved reopening, explicit reruns, simulated failures, budget stops, active-run refresh, and two-tab recovery. A recorded follow-up also verified stream-only blocking with snapshot polling and an offline interval followed by saved-review reopening. Abrupt backend restart was attempted but blocked by the execution sandbox; see the [runbook worksheet](docs/LOCAL_DEMO_RUNBOOK.md#acceptance-worksheet). Default preset initialization is skipped when a remembered run is being recovered, so a late preset response does not clear restored state. Regression tests exercise both preset/recovery response orders through the application hook harness; browser refresh passed in the recorded controlled-timeout scenario.
 
 ### Persistence & Interrupted Runs
 
@@ -195,8 +195,9 @@ The [local demo runbook](docs/LOCAL_DEMO_RUNBOOK.md) uses additional precautions
 
 ## Testing & Verification
 
+**Reported automated results — November 7, 2026**, application commit `b7ed1e8f1cd96b8737596c892541460418825301`. The backend count comes from a fresh `python -m pytest -q` run: **335 passed, 2 warnings in 84.41 seconds**.
 
-| Check | Verified result |
+| Check | Reported result (2026-11-07, `b7ed1e8`) |
 | --- | --- |
 | Backend pytest suite | **335 passed**; two existing third-party deprecation warnings. |
 | Frontend regression tests | **11 passed**. |
@@ -226,7 +227,7 @@ npx tsc --noEmit
 npm run build
 ```
 
-**Final manual browser acceptance testing is still in progress and requires developer confirmation.** Frontend regression tests use a helper harness, not a real browser acceptance run. These results do not establish paid-provider execution/billing, scientific validity, clinical efficacy, or unrestricted semantic correctness.
+**Browser acceptance is partially verified as of November 7, 2026: 12 worksheet scenarios were observed passing (including the documented offline/reopen variant), and abrupt backend restart was blocked; final acceptance still requires reviewer confirmation.** See the [runbook acceptance worksheet](docs/LOCAL_DEMO_RUNBOOK.md#acceptance-worksheet) for session IDs and remaining checks. Frontend regression tests use a helper harness, not a real browser acceptance run. These results do not establish paid-provider execution/billing, scientific validity, clinical efficacy, or unrestricted semantic correctness.
 
 ## Limitations
 
@@ -235,7 +236,7 @@ npm run build
 - Sessions use an existing unauthenticated, application-wide namespace intended for **trusted local use**.
 - Evidence is text supplied by the user; there is no independent external evidence verification. A valid citation or agreement between specialists is not proof.
 - Mock behavior is deterministic and bounded. Its 18 archetypes require explicit whole-word triggers and a domain anchor; absent vocabulary, negation, or ambiguous context can still produce incomplete or inappropriate matches. Generic fallbacks disclose insufficient domain coverage. Role/evidence handling does not provide general semantic understanding. Recommendations and proposed experiments are decision support, not validated market or clinical findings.
-- Live provider/model availability and fresh dependency installations were not validated by the reported offline tests. Manual browser recovery remains to be verified after the preset-loading race fix.
+- Live provider/model availability and fresh dependency installations were not validated by the reported offline tests. Browser checks and remaining acceptance gaps are recorded in the runbook; automated checks alone do not establish final manual acceptance.
 
 ## Technical & Research Sources
 
@@ -246,4 +247,4 @@ These papers motivate design exploration. They do not prove that this particular
 
 ## AI Coding Assistance
 
-AI coding assistance contributed to scaffolding, typing, mock logic, tests, and documentation. Reported automated checks and pending manual acceptance are distinguished above; no claim of comprehensive independent verification is implied.
+AI coding assistance contributed to scaffolding, typing, mock logic, tests, and documentation. Reported automated checks and partially completed browser acceptance are distinguished above; no claim of comprehensive independent verification is implied.
