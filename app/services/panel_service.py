@@ -50,17 +50,7 @@ class PanelService:
         """Generate 3 to 5 tailored specialist agents for the provided startup idea."""
         adapter = get_provider_adapter(provider)
 
-        evidence_summary = "\n".join([f"- [{e.id}] ({e.data_type}) {e.summary} (Source: {e.source})" for e in idea_input.evidence]) or "No empirical evidence supplied."
-
-        user_prompt = f"""Generate a panel of 3 to 5 specialist agents to review this startup idea:
-Title: {idea_input.title}
-Target Customer: {idea_input.target_customer}
-Problem: {idea_input.problem}
-Proposed Solution: {idea_input.proposed_solution}
-Idea Description: {idea_input.idea}
-Supplied Evidence:
-{evidence_summary}
-"""
+        user_prompt = json.dumps({"idea": idea_input.model_dump()}, ensure_ascii=False)
 
         try:
             response = await adapter.call(
