@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { startReview, observeReview, rememberRun, rememberedRun } from './reviewExecution';
 import {
   Brain,
   Shield,
@@ -149,6 +150,9 @@ interface ReviewBoardSession {
     total_latency_ms: number;
     total_tokens: number;
     total_cost_usd: number;
+    reported_tokens?: number;
+    estimated_tokens?: number;
+    simulated_tokens?: number;
     calls_made: number;
     budget_stopped: boolean;
     failures_encountered: number;
@@ -211,17 +215,18 @@ export default function App() {
 
   // Load presets on mount
   useEffect(() => {
-    fetchPresets();
+    // Capture before recovery can finish and clear the remembered identifier.
+    fetchPresets(rememberedRun() === null);
     fetchSavedSessions();
   }, []);
 
-  const fetchPresets = async () => {
+  const fetchPresets = async (applyDefault: boolean) => {
     try {
       const res = await fetch(`${API_BASE}/api/review-board/presets`);
       if (res.ok) {
         const data = await res.json();
         setPresets(data);
-        if (data.devtool_ebpf) {
+        if (applyDefault && data.devtool_ebpf) {
           applyPreset('devtool_ebpf', data.devtool_ebpf.idea);
         }
       }
@@ -303,72 +308,10 @@ export default function App() {
     setLiveAgentStatus({});
 
     try {
-      const res = await fetch(`${API_BASE}/api/review-board/run-stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          idea,
-          panel,
-          budget_config: budget
-        })
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || 'Review execution failed');
-      }
-
-      // Stream SSE events from response
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6));
-                handleStreamEvent(event);
-              } catch (e) {
-                // ignore keepalive/malformed
-              }
-            }
-          }
-        }
-      }
-
+      await startReview({ session_id: crypto.randomUUID(), idea, panel, budget_config: budget }, handleStreamEvent);
       fetchSavedSessions();
     } catch (err: any) {
-      // Fallback to standard POST /run if streaming fails
-      console.warn('SSE stream failed or interrupted, falling back to synchronous /run', err);
-      try {
-        const fallbackRes = await fetch(`${API_BASE}/api/review-board/run`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            idea,
-            panel,
-            budget_config: budget
-          })
-        });
-        if (!fallbackRes.ok) {
-          const errData = await fallbackRes.json();
-          throw new Error(errData.detail || 'Fallback execution failed');
-        }
-        const sessionData: ReviewBoardSession = await fallbackRes.json();
-        setCurrentSession(sessionData);
-        fetchSavedSessions();
-        setActiveTab('combined');
-      } catch (fbErr: any) {
-        setErrorMessage(fbErr.message);
-      }
+      setErrorMessage(err.message);
     } finally {
       setIsRunningReview(false);
       setCurrentPhase('idle');
@@ -377,7 +320,16 @@ export default function App() {
   };
 
   const handleStreamEvent = (event: any) => {
-    if (event.type === 'phase_started') {
+    if (event.type === 'session_snapshot') {
+      setCurrentSession(event.session);
+      setCurrentPhase(event.session.run_metadata?.phase === 'pending' ? 'specialists' : event.session.run_metadata?.phase || 'specialists');
+      setActiveSpecialistId(event.session.run_metadata?.active_specialist_id || null);
+      const statuses = Object.fromEntries(event.session.specialist_reviews.map((review: any) =>
+        [review.specialist_id, { status: review.status, latency_ms: review.latency_ms }]));
+      const activeId = event.session.run_metadata?.active_specialist_id;
+      if (activeId) statuses[activeId] = { status: 'running' };
+      setLiveAgentStatus(statuses);
+    } else if (event.type === 'phase_started') {
       setCurrentPhase(event.phase);
     } else if (event.type === 'specialist_started') {
       setActiveSpecialistId(event.specialist_id);
@@ -392,10 +344,26 @@ export default function App() {
         [event.specialist_id]: { status: event.status, latency_ms: event.latency_ms }
       }));
     } else if (event.type === 'session_final') {
+      if (event.session.run_metadata?.interrupted) setErrorMessage(event.session.run_metadata.interruption_reason);
       setCurrentSession(event.session);
       setActiveTab('combined');
     }
   };
+
+  useEffect(() => {
+    const id = rememberedRun();
+    if (!id) return;
+    setIsRunningReview(true);
+    observeReview(id, null, event => {
+      handleStreamEvent(event);
+      setIdea(event.session.idea);
+      setPanel(event.session.panel);
+      setBudget(event.session.budget_config);
+    })
+      .then(() => { fetchSavedSessions(); })
+      .catch((error: Error) => setErrorMessage(error.message))
+      .finally(() => { setIsRunningReview(false); setCurrentPhase('idle'); setActiveSpecialistId(null); });
+  }, []);
 
   // Reopen a saved session
   const handleReopenSession = async (sessionId: string) => {
@@ -409,6 +377,12 @@ export default function App() {
       setBudget(data.budget_config);
       setIsHistoryOpen(false);
       setActiveTab('combined');
+      if (data.status === 'in_progress') {
+        rememberRun(sessionId);
+        setIsRunningReview(true);
+        try { await observeReview(sessionId, data, handleStreamEvent); }
+        finally { setIsRunningReview(false); setCurrentPhase('idle'); setActiveSpecialistId(null); }
+      }
     } catch (err: any) {
       setErrorMessage(err.message);
     }
@@ -417,20 +391,24 @@ export default function App() {
   // Rerun current session with history preservation
   const handleRerunSession = async () => {
     if (!currentSession) return;
+    const childId = crypto.randomUUID();
+    rememberRun(childId);
     setIsRunningReview(true);
     setErrorMessage(null);
     try {
       const res = await fetch(`${API_BASE}/api/review-board/sessions/${currentSession.session_id}/rerun`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': childId },
         body: JSON.stringify(budget)
       });
       if (!res.ok) throw new Error('Rerun failed');
       const data: ReviewBoardSession = await res.json();
+      rememberRun(null);
       setCurrentSession(data);
       fetchSavedSessions();
     } catch (err: any) {
-      setErrorMessage(err.message);
+      try { await observeReview(childId, null, handleStreamEvent); }
+      catch { setErrorMessage(err.message); }
     } finally {
       setIsRunningReview(false);
     }
@@ -863,12 +841,15 @@ export default function App() {
                           <select
                             value={spec.provider}
                             onChange={(e) => {
-                              const p = e.target.value as any;
+                              const p = e.target.value as SpecialistAgentConfig['provider'];
                               let defaultModel = 'mock-deterministic';
                               if (p === 'openai') defaultModel = 'gpt-4o-mini';
                               if (p === 'gemini') defaultModel = 'gemini-1.5-flash';
-                              updateSpecialist(idx, 'provider', p);
-                              updateSpecialist(idx, 'model', defaultModel);
+                              setPanel(previous => previous.map((specialist, index) =>
+                                index === idx
+                                  ? { ...specialist, provider: p, model: defaultModel }
+                                  : specialist
+                              ));
                             }}
                             className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
                           >
@@ -999,11 +980,16 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-1">
                   <Cpu className="w-3.5 h-3.5 text-violet-400" />
-                  <span>{currentSession.execution_summary.total_tokens.toLocaleString()} tokens</span>
+                  <span>
+                    {currentSession.execution_summary.total_tokens.toLocaleString()} tokens
+                    {currentSession.execution_summary.reported_tokens !== undefined ? (
+                      <> ({currentSession.execution_summary.reported_tokens.toLocaleString()} reported / {currentSession.execution_summary.estimated_tokens?.toLocaleString() ?? '0'} estimated / {currentSession.execution_summary.simulated_tokens?.toLocaleString() ?? '0'} simulated)</>
+                    ) : ' (usage source unavailable)'}
+                  </span>
                 </div>
                 <div className="flex items-center gap-1">
                   <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>${currentSession.execution_summary.total_cost_usd.toFixed(5)}</span>
+                  <span>Est. cost: ${currentSession.execution_summary.total_cost_usd.toFixed(5)}</span>
                 </div>
               </div>
 
@@ -1188,8 +1174,8 @@ export default function App() {
 
                       <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
                         <span>{spec.latency_ms.toFixed(0)} ms</span>
-                        <span>{spec.token_usage?.total_tokens || 0} tok</span>
-                        <span>${(spec.cost_estimate_usd || 0).toFixed(5)}</span>
+                        <span>{spec.token_usage?.total_tokens || 0} tokens ({spec.is_simulated ? 'simulated' : 'reported/estimated'})</span>
+                        <span>Est. cost: ${(spec.cost_estimate_usd || 0).toFixed(5)}</span>
                       </div>
                     </div>
 

@@ -78,8 +78,8 @@ async def test_thin_anecdotal_evidence_rated_thin():
 
 
 @pytest.mark.anyio
-async def test_multi_item_benchmark_evidence_rated_sufficient():
-    """Verify that an idea with concrete empirical benchmarks and interviews is rated sufficient."""
+async def test_multiple_empirical_items_do_not_validate_unresolved_assumptions():
+    """Benchmarks and interviews alone do not demonstrate coverage of critical assumptions."""
     idea_backed = StartupIdeaInput(
         title="DevPulse eBPF Tracing",
         idea="Continuous distributed tracing using eBPF probes for Kubernetes microservices.",
@@ -107,5 +107,9 @@ async def test_multi_item_benchmark_evidence_rated_sufficient():
 
     assert session.combined_review is not None
     ev_status = session.combined_review.evidence_sufficiency.status
-    assert ev_status == "sufficient"
+    assert ev_status == "thin"
+    analysis = session.combined_review.evidence_sufficiency.analysis
+    assert "1.18% CPU overhead" in analysis
+    assert "10 of 12 confirm APM bill fatigue" in analysis
+    assert "Untested assumptions:" in analysis
 

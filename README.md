@@ -1,194 +1,230 @@
 # Multiple AI Review Board
 
-A full-stack multi-agent prototype where users submit startup ideas and receive structured, domain-specific feedback from a bespoke board of AI specialists. Specialists assess ideas independently, challenge one another's reasoning in a bounded debate round, and submit their findings to a coordinator agent that synthesizes priorities, exposes disagreements, evaluates evidence sufficiency, and recommends validation experiments.
+A full-stack multi-agent prototype for structured startup feedback. Users submit an idea and evidence, inspect a bespoke panel, and run independent specialist reviews, a bounded challenge-and-response debate, and coordinator synthesis. The report records priorities, unresolved concerns, evidence limitations, and proposed validation experiments.
 
-Built with **FastAPI**, **React 19**, **TypeScript**, and an extensible **Shared Connector Interface** supporting deterministic offline simulation, OpenAI, and Google Gemini.
-
----
+Built with **FastAPI**, **React 19**, **TypeScript**, and a shared provider interface supporting a deterministic offline mock, OpenAI, and Google Gemini. AI recommendations are decision support, not validated market or clinical findings.
 
 ## Architecture & System Design
 
-```
-+-----------------------------------------------------------------------------------+
-|                              Frontend (React 19 + Vite)                           |
-|  - Idea & Evidence Input (E1, E2...)       - Walkthrough Presets (DevPulse, Glow) |
-|  - Panel Inspector & Provider Switcher     - Budget & Failure Simulation Controls |
-|  - Multi-Stage Execution Tracker           - Saved Reviews Reopening & Rerun      |
-+-----------------------------------------------------------------------------------+
-                                        | (REST API)
-+-----------------------------------------------------------------------------------+
-|                           Backend (FastAPI Orchestrator)                          |
-+-----------------------------------------------------------------------------------+
-  |
-  +--> [1. Panel Generator]
-  |      Inspects problem, customer, solution & evidence.
-  |      Dynamically generates 3-5 domain-specific specialist agents with mandates.
-  |
-  +--> [2. Shared Connector Interface & Adapters]
-  |      - Deterministic Mock Adapter (Zero API keys required, latency & token simulation)
-  |      - OpenAI Adapter (AsyncOpenAI, GPT-4o-mini, GPT-4o)
-  |      - Google Gemini Adapter (google-genai SDK, Gemini-1.5-Flash, Gemini-2.0-Flash)
-  |      - Unified structured response contract across providers
-  |      - Server-side key protection & prompt injection data containment
-  |
-  +--> [3. Phase 1: Independent Specialist Reviews]
-  |      - Specialists evaluate in isolation (no seeing peer reviews)
-  |      - Strengths, risks, missing assumptions, probing questions, experiments
-  |      - Cites verified evidence IDs; validates & flags fabricated citations
-  |      - Per-agent timeout enforcement & max 1 retry on transient failure
-  |      - Failure isolation: failing agents do not crash the board
-  |
-  +--> [4. Phase 2: Bounded Challenge & Response Debate]
-  |      - Exactly 1 bounded cross-examination round
-  |      - Specialists challenge contested assumptions; targets defend or adjust logic
-  |
-  +--> [5. Phase 3: Coordinator Synthesis]
-  |      - Aggregates findings into decision-support report
-  |      - Top strategic priorities & key specialist disagreements
-  |      - Ranked concrete validation experiments
-  |      - Objective Evidence Sufficiency rating ("sufficient", "thin", "insufficient")
-  |      - Specialist Failure Impact Analysis (if any agent timed out or failed)
-  |      - Mandatory disclaimer: Decision support only; consensus != proof of demand
-  |
-  +--> [6. Persistence & Session Store]
-         - Saves sessions to disk (`data/saved_reviews/`)
-         - Reopen any historical review or rerun with 1 click
+```text
+React + Vite
+  Idea / evidence / presets -> editable specialist panel / providers / budget
+                                |
+                            FastAPI API
+                                |
+  Panel generation (separate from the review-run budget)
+                                |
+  Identified run -> independent specialist reviews
+                                |
+                   bounded challenge / response
+                                |
+                   coordinator synthesis (mock)
+                                |
+                   atomic JSON session checkpoints
+                                |
+  Saved Reviews / GET snapshots / sequenced SSE -> browser recovery
 ```
 
----
+- **Panel generation:** generates 3–5 specialists with roles, expertise, mandates, and rationales; users can inspect and edit the panel before execution.
+- **Independent reviews:** each specialist sees the idea and supplied evidence, without peer reviews. Outputs include strengths, risks, missing assumptions, questions, evidence citations, assumptions/unknowns, and a validation experiment with a hypothesis, test design, and success metric.
+- **Bounded debate:** one challenge-and-response round, with up to two exchanges for a four-specialist panel and one for a three-specialist panel. Failed reviews and budget limits can reduce participation. Challenges use actual findings; complementary risks are not automatically disagreements or consensus.
+- **Coordinator synthesis:** combines available reviews and exchanges into priorities, disagreements, experiments, evidence sufficiency, and failure impact when applicable. The current coordinator always uses the **mock adapter**, including when specialists use live providers. Output provenance identifies this.
+- **Persistence:** saved sessions retain findings, exchanges, synthesis, configuration, lineage, and execution accounting under `data/saved_reviews/`.
+
+Implementation: [orchestrator](app/services/review_orchestrator.py), [response contracts](app/schemas/review_board_schema.py), [run ownership](app/services/review_runs.py), and [session storage](app/services/session_store.py).
+
+## Provider Abstraction & Evidence Handling
+
+The shared connector interface uses explicit task identifiers for panel generation, specialist review, challenge generation, challenge response, and coordinator synthesis. User-entered keywords cannot select an operation. Responses undergo JSON parsing and task-specific schema validation; malformed or incomplete output is recorded as failure rather than filled with fabricated assessments. Panel generation has an explicit fallback panel; coordinator failure produces explicitly marked fallback guidance.
+
+| Provider key | UI/default model name | Behavior |
+| --- | --- | --- |
+| `mock` | `mock-deterministic` | Deterministic, bounded offline reasoning and simulated usage; no API key required. |
+| `openai` | `gpt-4o-mini` | Asynchronous OpenAI adapter; requires a backend key. |
+| `gemini` | `gemini-1.5-flash` | Native asynchronous Google GenAI adapter; requires a backend key. |
+
+These are names configured in the source, **not verified statements of current live model availability**. Specialist model names are editable; provider switching updates provider and model together. Gemini's settings fallback is `gemini-3.5-flash-lite` when no explicit model is supplied; normal UI selection supplies its own model. Cost estimates use a local pricing table and are not authoritative billing quotes.
+
+Mock specialist feedback uses role, expertise, mandate, startup context, and actual supplied evidence text. Bounded rules distinguish domain risks and experiments and respond to supported evidence mutations, such as an unfavorable CPU-overhead measurement. This is not a general-purpose semantic inference engine.
+
+Evidence citations reference supplied IDs such as `E1`, `E2`, or arbitrary IDs. IDs are normalized for matching; unsupplied citations are flagged in `invalid_citations`. **Matching an ID does not independently verify its underlying claim.** Evidence items are supplied reports, not proof of validation. Missing evidence produces explicit uncertainty; experiments are proposals, not completed results.
+
+The schema allows evidence sufficiency `sufficient`, `thin`, or `insufficient`. The current mock conservatively returns `thin` for supplied reports and `insufficient` when none are supplied; item counts or source labels do not earn a `sufficient` rating.
 
 ## Walkthrough & Demo Scenarios
 
-The application includes 3 built-in curated presets accessible directly from the UI or API:
+Select a Walkthrough Preset, choose **Deterministic Mock** for panel generation, generate the panel, confirm every specialist uses `mock` / `mock-deterministic`, and run the review. Use a budget sufficient for the whole workflow: **20 calls and 50,000 tokens** are used by the offline verifier. Panel generation is outside that run budget.
 
-### 1. Contrasting Idea A: DevPulse (Developer Tool / Infrastructure)
-- **Concept:** Kernel-level eBPF continuous distributed tracing & APM for Kubernetes with sub-1.5% CPU overhead and zero code instrumentation.
-- **Evidence:** 
-  - `[E1]` Synthetic 50-node benchmark recording 1.18% CPU overhead under 25,000 req/sec load.
-  - `[E2]` 12 customer discovery interviews with platform engineering leads confirming Datadog cost fatigue.
-- **Generated Panel:** Developer Experience Specialist, Cloud Infrastructure & Kernel Systems Architect, DevSecOps & Enterprise Compliance Auditor, Open-Core GTM Strategist.
-- **Debate Focus:** Tension between 1-click CLI developer experience vs root/CAP_BPF host privileges required by enterprise security.
+### DevPulse — Developer Tool / Infrastructure
 
-### 2. Contrasting Idea B: GlowGreen (Consumer D2C / Sustainability)
-- **Concept:** Closed-loop refillable skincare subscription in weighted aluminum bottles with prepaid return mailers for industrial cleaning and reuse.
-- **Evidence:**
-  - `[E1]` Meta/TikTok paid ad test acquiring 540 waitlist emails at $2.22 blended CPA.
-  - `[E2]` 50-person Austin pilot showing a 42% physical container return rate over 60 days.
-- **Generated Panel:** Sustainable Supply Chain & Reverse Logistics Specialist, D2C Retention & Customer Lifecycle Strategist, Cosmetic Formulation & FDA Regulatory Compliance Officer, Unit Economics Analyst.
-- **Debate Focus:** Reverse logistics freight and cleaning costs vs unit margin, and batch-return loops vs single-bottle returns.
+- **Concept:** eBPF tracing/APM for Kubernetes, claiming low overhead and zero application instrumentation.
+- **Supplied reports:** `[E1]` a synthetic 50-node benchmark reporting 1.18% CPU overhead at 25,000 requests/second; `[E2]` 12 discovery interviews reporting observability cost concerns. These reports are not independently verified.
+- **Panel:** developer experience, cloud infrastructure/kernel systems, DevSecOps/compliance, and open-core GTM.
+- **Review focus:** onboarding friction, kernel compatibility/runtime overhead, telemetry security, and budget-holder commitment. Debate compares these actual findings; it does not invent opposing positions. A supplied benchmark does not establish production safety or willingness to pay.
 
-### 3. Thin-Evidence Case: QuantumSleep (Consumer Hardware / Neurotech)
-- **Concept:** Acoustic bone-conduction sleep pillow claiming to cure chronic insomnia using binaural delta-wave entrainment.
-- **Evidence:**
-  - `[E1]` Founder personal diary reporting falling asleep in 12 minutes rather than 45 minutes across 14 nights (n=1 anecdote).
-- **Behavior:** The Review Board identifies severe lack of empirical proof. The Coordinator explicitly marks Evidence Sufficiency as **"thin"**, labels heavy unverified assumptions, and mandates randomized sham-controlled polysomnography trials before commercial claims.
+### GlowGreen — Consumer D2C / Sustainability
 
-### 4. Provider Failure & Resilience Demo
-- In the Panel Inspector, select **"Simulate Timeout"** or **"Simulate Connection Error"** on any specialist.
-- **Result:** The review board isolates the error, marks the specialist as `failed` or `timed_out` with an explicit red alert banner, and proceeds with the remaining agents.
-- The **Coordinator** prominently includes a **Failure Impact Analysis**, explaining how the absence of that perspective degrades confidence in that specific technical domain.
+- **Concept:** refillable skincare subscriptions using returnable aluminum packaging.
+- **Supplied reports:** `[E1]` an ad test reporting 540 waitlist emails at $2.22 blended acquisition cost; `[E2]` an Austin pilot reporting a 42% container return rate among 50 participants over 60 days.
+- **Panel:** reverse logistics, customer retention, cosmetic safety/compliance, and unit economics.
+- **Review focus:** return friction, paid renewals, microbial safety, and contribution margin after freight/cleaning. Waitlist acquisition does not prove repeat purchase, and a reported return rate does not establish profitable reuse.
 
-### 5. Reopening & Rerunning Saved Reviews
-- Open the **"Saved Reviews"** drawer to inspect past runs. Click any run to restore its idea, panel configuration, discussion, and coordinator synthesis. Click **"Rerun Review"** to re-evaluate with current settings.
+### QuantumSleep — Thin Evidence / Neurotech Hardware
 
----
+- **Concept:** an acoustic sleep pillow making insomnia-treatment claims.
+- **Supplied report:** `[E1]` a founder's 14-night diary reporting sleep onset of 12 rather than 45 minutes: an uncontrolled, single-person anecdote.
+- **Panel:** sleep medicine, hardware/ergonomics, and health-claims regulation.
+- **Review focus:** confounding and clinical evidence gaps, comfort/durability, and therapeutic claims outrunning evidence. The mock labels supplied evidence `thin` and explicitly insufficient to establish clinical efficacy. Controlled studies are proposed, not claimed to have occurred.
 
-## Usability, Reliability & Security Controls
+### Failure Simulation & Saved Reviews
 
-1. **Zero-API-Key Operation:** Fully functional out-of-the-box using the deterministic mock adapter with realistic latency and token generation. Live OpenAI and Gemini adapters can be toggled without code modifications.
-2. **Provider Separation:** Specialist domain roles are strictly decoupled from underlying AI models.
-3. **Structured Response Contract:** Every provider response is validated and normalized into consistent Pydantic models.
-4. **Timeouts & Retry Bounds:** Every LLM call is bound by a configurable timeout (`asyncio.wait_for`) with at most **one retry** on transient failure.
-5. **Budget Stops:** Configurable hard call cap and token cap halts execution immediately if limits are reached.
-6. **Citation Verification:** Extracted evidence citations are checked against supplied evidence IDs. Any hallucinated citation (e.g. `E99`) is separated and flagged under `invalid_citations`.
-7. **Prompt Injection Protection:** User input text is treated strictly as passive evaluation data, wrapped in `<user_startup_data>` XML delimiters with explicit instructions forbidding instruction override.
-8. **Server-Side Key Hygiene:** API keys are never exposed to the frontend or written to logs.
+The Panel Inspector offers **Simulate Timeout** and **Simulate Connection Error**. Affected reviews record failure or timeout while available results remain usable. Failure impact is conditional; successful specialists alone do not trigger a failure warning. Budget exhaustion can also stop later phases.
 
----
+Open **Saved Reviews** to inspect a stored session. **Rerun Review** explicitly creates a new child run from the saved parent with recorded lineage; it does not restart the parent's identifier. See the [manual demo runbook](docs/LOCAL_DEMO_RUNBOOK.md) for exact controls and expected pass/fail behavior.
 
-## Technical & Research Sources
+## Execution Reliability & Recovery
 
-1. **Multi-Agent Debate for Reasoning & Hallucination Reduction**  
-   *Du, Y., Li, S., Torralba, A., Tenenbaum, J. B., & Mordatch, I. (2023). "Improving Factuality and Reasoning in Language Models through Multi-Agent Debate." arXiv:2305.14325.*  
-   *Application in Project:* Demonstrates that independent generation followed by bounded debate rounds significantly reduces single-model cognitive bias, blind spots, and hallucinations compared to single-agent reflection. Our Phase 1 (independent evaluation) and Phase 2 (bounded challenge round) directly mirror this finding.
+These guarantees apply to cooperating processes in the existing **file-based, single-node POSIX execution model**, while identifiers and saved files are retained. They do not establish exactly-once remote execution or billing.
 
-2. **Persona-Conditioned Evaluation & Agent Specialization**  
-   *Park, J. S., O'Brien, J. C., Cai, C. J., Morris, M. R., Liang, P., & Bernstein, M. S. (2023). "Generative Agents: Interactive Simulacra of Human Behavior." arXiv:2304.03442.*  
-   *Application in Project:* Informs how domain-specific persona conditioning, explicit mandates, and separate coordinator synthesis prevent agents from collapsing into uniform generic consensus, ensuring contrasting startup ideas yield genuinely tailored perspectives.
+### Idempotent Execution
 
----
+Clients use a stable `session_id` or `Idempotency-Key`; if both are supplied they must match. The backend computes a SHA-256 fingerprint of the normalized idea, ordered panel, budget configuration, and rerun parent. Repeating an identifier with matching parameters attaches to the existing run. Different parameters return HTTP **409 Conflict**.
 
-## Trade-offs & Design Decisions
+Nonblocking POSIX `flock` execution claims prevent cooperating workers sharing the session directory from dispatching the same run concurrently. The initial checkpoint is saved before provider work is scheduled, and the execution owner retains the lock. Completed or interrupted identifiers are not implicitly restarted: request a new identifier for a new run or explicitly rerun into a new child session.
 
-- **Independent Coordinator vs. Consensus Voting:** Rather than averaging agent opinions, we use an independent coordinator. Consensus among LLMs is often sycophantic; an independent coordinator explicitly records unresolved disagreements and insists that consensus is not proof of market demand.
-- **Bounded Debate (1 Round):** We restrict cross-examination to exactly one bounded round. Multi-round open-ended debates create token explosion and circular arguments with diminishing informational returns.
-- **Deterministic Mock Adapter:** Implemented a zero-dependency deterministic mock provider that produces domain-accurate responses for contrasting ideas, allowing complete CI/CD testing and offline demos without API quotas.
-- **Client-Side Editing of Panels:** Allowing users to inspect and adjust the panel before running gives human operators oversight over AI agent composition.
+### Stream Recovery
 
----
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/review-board/runs` | Start or attach to an identified run; returns HTTP 202 and session state. |
+| `GET /api/review-board/sessions/{id}` | Retrieve saved state without provider execution. |
+| `GET /api/review-board/sessions/{id}/events` | Subscribe to sequenced SSE snapshots without starting execution; supports `after` and `Last-Event-ID` cursors. |
+| `POST /api/review-board/sessions/{id}/rerun` | Explicitly create or attach to an identified child rerun. |
+
+Compatibility routes `/api/review-board/run` and `/api/review-board/run-stream` remain available.
+
+Execution is owned by a server task, so browser refreshes and disconnected HTTP streams do not cancel it. The frontend remembers the active identifier and recovers existing state through GET requests. Broken streams fall back to snapshot polling rather than another provider workflow. If full network loss also breaks polling, the observer may stop with an error; restore connectivity and refresh/reopen the session. Automatic resubscription on a browser Online event is not implemented.
+
+Manual browser acceptance remains pending. Default preset initialization is skipped when a remembered run is being recovered, so a late preset response does not clear restored state. Regression tests exercise both preset/recovery response orders through the application hook harness; actual browser refresh behavior still requires the runbook checks.
+
+### Persistence & Interrupted Runs
+
+Session checkpoints are written to temporary files in the session directory, flushed, `fsync`ed, and atomically replaced with `os.replace`. They preserve completed specialist findings, debate exchanges, coordinator output when available, and the last durable budget ledger. Accounting is checkpointed before provider dispatch.
+
+If an in-progress session no longer has an execution owner, retrieval conservatively represents it as `partial_failure` when findings exist, otherwise `failed`, with interruption metadata. GET recovery can project this state without rewriting the raw JSON. Outstanding usage remains uncertain rather than being erased. No interrupted remote provider operation is automatically resumed. Atomic replacement applies per file; rerun lineage updates are not a multi-file transaction.
+
+### Budgets, Retries, Timeouts & Partial Results
+
+- An `asyncio.Lock` synchronizes reservation and settlement of call/token budgets. Settled usage plus in-flight reservations prevents application-level oversubscription before dispatch.
+- Input estimates and configured output allowances reserve capacity. Actual usage can exceed estimates; overruns are reported accurately, not silently capped, and block subsequent dispatch. Usage is labeled reported, estimated, or simulated; unknown failed-call usage retains conservative accounting.
+- Each specialist has at most one retry, subject to configuration, remaining budget, and explicit retryability. Timeouts and ambiguous remote completion are not automatically retried. SDK retries are disabled/bounded so attempts remain visible to application accounting.
+- Local await deadlines request cancellation but cannot prove a remote provider stopped or refunded a request. Pending SDK work is guarded against overlapping reuse. The timeout implementation is not a blanket `asyncio.wait_for` guarantee.
+- Failed specialists do not erase completed reviews. Debate participation and synthesis depend on available findings and budget. Coordinator failures are explicitly marked; fallback guidance is not represented as successful provider reasoning.
+
+## Security & Design Trade-offs
+
+Structured input delimiters such as `<user_startup_data>` and explicit role/mandate framing treat startup text as evaluation data. These are prompt-injection mitigations, not immunity. Live keys are configured on the backend; adapters redact configured keys from error details. This is not a guarantee that arbitrary sensitive input cannot appear in output or logs.
+
+Independent reviews reduce immediate peer influence; bounded debate controls execution cost and avoids unbounded loops. Coordinator synthesis preserves complementary concerns and recognized disagreements rather than treating agent agreement as proof. The deterministic mock makes offline regressions reproducible but relies on bounded rules. Editable panels allow human oversight. File checkpoints keep local operation simple, at the cost of distributed execution and database transaction guarantees.
+
+## Installation & Usage
+
+### Prerequisites
+
+- Python **3.12+**; the reported verification used **3.14.2**. Backend requirements are unpinned, so fresh dependency resolution can differ from the tested environment.
+- Node.js **20.19+ within 20.x, or 22.12+**, matching the installed Vite engine range; tested with Node **22.22.0** and npm **10.9.4**.
+- A POSIX environment supporting `fcntl.flock`, such as macOS or Linux.
+
+### Backend — From Repository Root
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload
+```
+
+API: `http://localhost:8000`; interactive docs: `http://localhost:8000/docs`; health: `http://localhost:8000/health`.
+
+### Frontend — Separate Terminal, Starting at Repository Root
+
+```bash
+cd frontend && npm ci
+npm run dev
+```
+
+Open `http://localhost:5173`. Keep the same frontend origin across tabs so active-run browser storage is shared. The frontend calls `http://localhost:8000`.
+
+### Deterministic Mock & Optional Live Providers
+
+No paid keys are needed for the review-board mock. Choose **Deterministic Mock** for panel generation and each specialist; use `mock-deterministic` and disable failure simulation for baseline runs. Do not set the legacy `LLM_PROVIDER=mock`: that separate legacy setting does not accept `mock`.
+
+For optional live specialists, set backend environment variables privately before starting the backend, then select the corresponding provider/model in the UI:
+
+```bash
+# Placeholders only: supply your own values privately.
+
+export OPENAI_API_KEY='<your-openai-key>'
+export GEMINI_API_KEY='<your-gemini-key>'
+python -m uvicorn app.main:app --reload
+```
+
+Backend settings also load `.env`; keep secrets out of version control and frontend variables. Real provider execution and current model availability have not been established by the offline checks. Coordinator synthesis remains mock.
+
+The [local demo runbook](docs/LOCAL_DEMO_RUNBOOK.md) uses additional precautions for controlled interruption testing: explicitly blank keys, avoid `--reload`, record the process PID, and keep ports/origins stable. Follow it for refresh, stream interruption, two tabs, reruns, failure simulation, budget exhaustion, and interrupted-run inspection.
+
+## Testing & Verification
+
+**Reported automated verification — November 6, 2026**, application baseline `9e79d12da9d700518ad052b13f0f71d089f3936e`:
+
+| Check | Reported result |
+| --- | --- |
+| Backend pytest suite | **297 passed**; two existing third-party deprecation warnings. |
+| Frontend regression tests | **7 passed**. |
+| Deterministic offline demo behavioral checks | **53/53 passed** across DevPulse, GlowGreen, and QuantumSleep. |
+| TypeScript check | Passed. |
+| Vite production build | Passed. |
+
+The [verification report](docs/DEMO_VERIFICATION_RESULTS.md) records environment versions, artifacts, counts, and limits. The demo verifier exercises actual API/orchestration/persistence paths through `TestClient` and forbids live adapter calls. It checks specialist differentiation, grounded debate/priorities/experiments, evidence limitations, saved-result retrieval, and zero additional calls on identified replay. Existing suites cover reconnection, idempotency, failures, retries, timeouts, and budgets.
+
+Reproduce from the repository root with the virtual environment activated:
+
+```bash
+# Empty keys also prevent legacy test routes from selecting a paid client.
+
+env OPENAI_API_KEY= GEMINI_API_KEY= ANTHROPIC_API_KEY= GROQ_API_KEY= XAI_API_KEY= SERPER_API_KEY= SERPAPI_API_KEY= \
+  python -m pytest -q
+env OPENAI_API_KEY= GEMINI_API_KEY= ANTHROPIC_API_KEY= GROQ_API_KEY= XAI_API_KEY= SERPER_API_KEY= SERPAPI_API_KEY= \
+  python scripts/verify_offline_demo.py
+```
+
+The verifier creates a fresh artifact directory under `data/saved_reviews/demo-verification/` and does not require running frontend/backend servers. In a separate terminal from the repository root, after `npm ci`:
+
+```bash
+cd frontend
+node --test tests/*.test.cjs
+npx tsc --noEmit
+npm run build
+```
+
+**Final manual browser acceptance testing is still in progress and requires developer confirmation.** Frontend regression tests use a helper harness, not a real browser acceptance run. These results do not establish paid-provider execution/billing, scientific validity, clinical efficacy, or unrestricted semantic correctness.
 
 ## Limitations
 
-- **Simulated vs. Real User Behavior:** AI review boards provide structured decision support and uncover blind spots, but they do not replace direct customer interviews or willingness-to-pay transaction tests.
-- **Textual Evidence Only:** Current evidence ingestion supports structured text, metrics, and interview quotes; direct multimodal verification of CAD designs or binary traces is not yet integrated.
+- File-based storage and POSIX locking assume cooperating processes on reliable local storage. There is no distributed/multi-host execution guarantee.
+- Interrupted provider operations are not resumed automatically. Remote completion/cancellation may be unknown; there is no exactly-once remote execution or billing guarantee.
+- Sessions use an existing unauthenticated, application-wide namespace intended for **trusted local use**.
+- Evidence is text supplied by the user; there is no independent external evidence verification. A valid citation or agreement between specialists is not proof.
+- Mock behavior is deterministic and bounded; role/evidence handling does not provide general semantic understanding. Recommendations and proposed experiments are decision support, not validated market or clinical findings.
+- Live provider/model availability and fresh dependency installations were not validated by the reported offline tests. Manual browser recovery remains to be verified after the preset-loading race fix.
 
----
+## Technical & Research Sources
+
+- Du, Y., Li, S., Torralba, A., Tenenbaum, J. B., & Mordatch, I. (2023). [Improving Factuality and Reasoning in Language Models through Multiagent Debate](https://arxiv.org/abs/2305.14325). Background for independent generation and bounded debate.
+- Park, J. S., O'Brien, J. C., Cai, C. J., Morris, M. R., Liang, P., & Bernstein, M. S. (2023). [Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442). Background on agent design and simulation; not a direct validation of specialist startup evaluation.
+
+These papers motivate design exploration. They do not prove that this particular implementation improves reasoning accuracy or reduces hallucinations.
 
 ## AI Coding Assistance
 
-AI coding assistance was utilized during development for scaffold code generation, typing definitions, mock test data authoring, and test fixture assembly. All agent orchestration logic, citation validation algorithms, prompt defense wrappers, and test suites were verified and reviewed.
-
----
-
-## Installation & How to Run
-
-### 1. Prerequisites
-- Python 3.12+
-- Node.js 20+ and npm
-
-### 2. Backend Setup
-```bash
-# From repository root
-cd startup-validator
-
-# Activate Python virtual environment
-source venv/bin/activate  # or: python3 -m venv venv && source venv/bin/activate
-
-# Install dependencies (already satisfied if using existing venv)
-pip install -r requirements.txt
-
-# Start FastAPI backend server
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-- API Documentation (Swagger UI): `http://127.0.0.1:8000/docs`
-- Health check: `http://127.0.0.1:8000/health`
-
-### 3. Frontend Setup
-```bash
-# In a separate terminal
-cd startup-validator/frontend
-
-# Run development server
-npm run dev
-```
-Open `http://localhost:5173` in your browser.
-
----
-
-## Running Automated Tests
-
-Run the full automated test suite covering all 6 core evaluation areas:
-```bash
-cd startup-validator
-PYTHONPATH=. ./venv/bin/pytest tests/ -v
-```
-
-### Test Suite Coverage:
-1. `tests/test_panel_structure.py`: Validates 3-5 specialists, required fields, and meaningful panel divergence across contrasting ideas.
-2. `tests/test_provider_normalization.py`: Validates unified connector interface, cost calculators, API key sanitation, and prompt defense tags.
-3. `tests/test_malformed_output.py`: Validates schema validation and error isolation on malformed JSON outputs.
-4. `tests/test_invalid_citations.py`: Validates valid evidence ID recognition and flagging of hallucinated/unsupplied citations.
-5. `tests/test_timeouts_and_retries.py`: Validates timeout limits and bounding to at most one retry.
-6. `tests/test_budget_stops.py`: Validates call cap and token cap execution halts.
-7. `tests/test_failure_isolation.py`: Validates board resilience when a specialist fails and coordinator impact reporting.
-8. `tests/test_review_api.py`: Validates FastAPI review board endpoints (presets, panel generation, running, persistence, reopening, rerunning).
+AI coding assistance contributed to scaffolding, typing, mock logic, tests, and documentation. Reported automated checks and pending manual acceptance are distinguished above; no claim of comprehensive independent verification is implied.

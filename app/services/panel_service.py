@@ -12,6 +12,7 @@ from app.schemas.review_board_schema import (
     SpecialistAgentConfig,
 )
 from app.models.connectors.factory import get_provider_adapter
+from app.schemas.provider_results import validate_result, ResponseFailure
 
 
 PANEL_GENERATION_SYSTEM_PROMPT = """You are an expert startup advisor and panel chair.
@@ -61,45 +62,31 @@ Supplied Evidence:
 {evidence_summary}
 """
 
-        response = await adapter.call(
-            system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            model=model,
-            timeout_seconds=15.0
-        )
-
-        specialists: List[SpecialistAgentConfig] = []
-        parsed = response.parsed_json or {}
-        raw_specs = parsed.get("specialists", [])
-
-        if not raw_specs or len(raw_specs) < 3:
-            # Fallback to deterministic generation if parsing failed or fewer than 3 generated
-            mock_adapter = get_provider_adapter("mock")
-            fallback_res = await mock_adapter.call(
-                system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                model="mock-deterministic"
+        try:
+            response = await adapter.call(
+                task="panel_generation", system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
+                user_prompt=user_prompt, model=model, timeout_seconds=15.0,
             )
-            raw_specs = (fallback_res.parsed_json or {}).get("specialists", [])
-
-        seen_ids = set()
-        for idx, s in enumerate(raw_specs[:5]):
-            spec_id = s.get("id") or f"spec_{idx+1}"
-            if spec_id in seen_ids:
-                spec_id = f"spec_{idx+1}"
-            seen_ids.add(spec_id)
-
-            specialists.append(SpecialistAgentConfig(
-                id=spec_id,
-                role=s.get("role", f"Domain Specialist {idx+1}"),
-                expertise=s.get("expertise", "Relevant industry and technical domain expertise."),
-                mandate=s.get("mandate", "Scrutinize assumptions and identify operational failure risks."),
-                rationale=s.get("rationale", "Provides necessary specialized perspective for this business model."),
-                provider=s.get("provider") or provider or "mock",
-                model=s.get("model") or model or "mock-deterministic"
-            ))
-
-        return specialists
+            parsed = validate_result("panel_generation", response)
+            return [SpecialistAgentConfig.model_validate(s) for s in parsed["specialists"]]
+        except ResponseFailure as exc:
+            if provider == "mock":
+                raise
+            # Keep the existing deterministic fallback, visibly attributed in the
+            # existing list contract. Never repair malformed live specialist entries.
+            reason = exc.kind
+            mock_adapter = get_provider_adapter("mock")
+            fallback = await mock_adapter.call(
+                task="panel_generation", system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
+                user_prompt=user_prompt, model="mock-deterministic",
+            )
+            parsed = validate_result("panel_generation", fallback)
+            specialists = [SpecialistAgentConfig.model_validate(s) for s in parsed["specialists"]]
+            for specialist in specialists:
+                specialist.provider = "mock"
+                specialist.model = "mock-deterministic"
+                specialist.rationale = f"[EXPLICIT MOCK FALLBACK: {provider} {reason}] {specialist.rationale}"
+            return specialists
 
     @staticmethod
     def get_presets() -> Dict[str, Dict[str, Any]]:

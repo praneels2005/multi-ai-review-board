@@ -170,6 +170,7 @@ class CoordinatorCombinedReview(BaseModel):
 
 class BudgetConfig(BaseModel):
     """Reliability and budget controls for running a review board."""
+    max_output_tokens_per_call: int = Field(default=4096, ge=1, le=32768, description="Per-attempt output token limit and reservation")
     call_cap: int = Field(default=20, ge=1, le=50, description="Maximum total LLM calls allowed in session")
     token_cap: int = Field(default=50000, ge=1000, le=200000, description="Maximum total token budget")
     timeout_seconds: float = Field(default=12.0, ge=0.1, le=60.0, description="Per-call timeout limit in seconds")
@@ -179,6 +180,7 @@ class BudgetConfig(BaseModel):
 class ReviewBoardSession(BaseModel):
     """Full session state for saving, reopening, or rerunning a review board."""
     session_id: str
+    run_metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution identity and recovery checkpoint metadata")
     created_at: str
     idea: StartupIdeaInput
     panel: List[SpecialistAgentConfig] = Field(..., min_length=3, max_length=5)
