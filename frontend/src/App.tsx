@@ -150,6 +150,9 @@ interface ReviewBoardSession {
     total_latency_ms: number;
     total_tokens: number;
     total_cost_usd: number;
+    reported_tokens?: number;
+    estimated_tokens?: number;
+    simulated_tokens?: number;
     calls_made: number;
     budget_stopped: boolean;
     failures_encountered: number;
@@ -212,17 +215,18 @@ export default function App() {
 
   // Load presets on mount
   useEffect(() => {
-    fetchPresets();
+    // Capture before recovery can finish and clear the remembered identifier.
+    fetchPresets(rememberedRun() === null);
     fetchSavedSessions();
   }, []);
 
-  const fetchPresets = async () => {
+  const fetchPresets = async (applyDefault: boolean) => {
     try {
       const res = await fetch(`${API_BASE}/api/review-board/presets`);
       if (res.ok) {
         const data = await res.json();
         setPresets(data);
-        if (data.devtool_ebpf) {
+        if (applyDefault && data.devtool_ebpf) {
           applyPreset('devtool_ebpf', data.devtool_ebpf.idea);
         }
       }
@@ -976,11 +980,16 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-1">
                   <Cpu className="w-3.5 h-3.5 text-violet-400" />
-                  <span>{currentSession.execution_summary.total_tokens.toLocaleString()} tokens</span>
+                  <span>
+                    {currentSession.execution_summary.total_tokens.toLocaleString()} tokens
+                    {currentSession.execution_summary.reported_tokens !== undefined ? (
+                      <> ({currentSession.execution_summary.reported_tokens.toLocaleString()} reported / {currentSession.execution_summary.estimated_tokens?.toLocaleString() ?? '0'} estimated / {currentSession.execution_summary.simulated_tokens?.toLocaleString() ?? '0'} simulated)</>
+                    ) : ' (usage source unavailable)'}
+                  </span>
                 </div>
                 <div className="flex items-center gap-1">
                   <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>${currentSession.execution_summary.total_cost_usd.toFixed(5)}</span>
+                  <span>Est. cost: ${currentSession.execution_summary.total_cost_usd.toFixed(5)}</span>
                 </div>
               </div>
 
@@ -1165,8 +1174,8 @@ export default function App() {
 
                       <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
                         <span>{spec.latency_ms.toFixed(0)} ms</span>
-                        <span>{spec.token_usage?.total_tokens || 0} tok</span>
-                        <span>${(spec.cost_estimate_usd || 0).toFixed(5)}</span>
+                        <span>{spec.token_usage?.total_tokens || 0} tokens ({spec.is_simulated ? 'simulated' : 'reported/estimated'})</span>
+                        <span>Est. cost: ${(spec.cost_estimate_usd || 0).toFixed(5)}</span>
                       </div>
                     </div>
 
