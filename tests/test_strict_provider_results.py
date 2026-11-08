@@ -92,11 +92,11 @@ def test_nested_experiments_cannot_get_placeholders(valid, task, experiment):
 
 def test_optional_fields_and_empty_coordinator_collections_remain_valid(valid):
     specialist = valid["specialist_review"]
-    specialist.pop("validation_experiment")
     specialist.pop("evidence_citations")
     specialist.pop("assumptions_and_unknowns")
     parsed = validate_result("specialist_review", response(specialist))
-    assert parsed["validation_experiment"] is None and parsed["evidence_citations"] == []
+    assert parsed["validation_experiment"] == specialist["validation_experiment"]
+    assert parsed["evidence_citations"] == []
     coordinator = valid["coordinator_synthesis"]
     coordinator.update(disagreements=[], next_experiments=[], priorities=[])
     assert validate_result("coordinator_synthesis", response(coordinator))["disagreements"] == []
@@ -304,3 +304,36 @@ def test_live_timeouts_remain_timeouts(provider):
     with pytest.raises(asyncio.TimeoutError) as raised:
         asyncio.run(adapter.call("S", "U"))
     assert "timed out" in str(raised.value)
+
+
+@pytest.mark.parametrize("mutation", ["omitted", "null", "empty", "missing_metric", "blank_metric"])
+def test_successful_specialist_requires_complete_experiment(valid, mutation):
+    payload = valid["specialist_review"]
+    if mutation == "omitted":
+        payload.pop("validation_experiment")
+    elif mutation == "null":
+        payload["validation_experiment"] = None
+    elif mutation == "empty":
+        payload["validation_experiment"] = {}
+    elif mutation == "missing_metric":
+        payload["validation_experiment"].pop("success_metric")
+    else:
+        payload["validation_experiment"]["success_metric"] = "   "
+    with pytest.raises(ResponseFailure, match="schema_validation"):
+        validate_result("specialist_review", response(payload))
+
+
+@pytest.mark.parametrize("omit", [True, False])
+def test_missing_experiment_becomes_explicit_failure(board, valid, monkeypatch, omit):
+    idea, panel, _ = board
+    payload = valid["specialist_review"]
+    if omit:
+        payload.pop("validation_experiment")
+    else:
+        payload["validation_experiment"] = None
+    inject_invalid(monkeypatch, "specialist_review", payload)
+    session = asyncio.run(ReviewBoardOrchestrator(BudgetConfig(max_retries=0)).execute_board(idea, panel))
+    assert all(r.status == "failed" and "schema_validation" in r.error_message for r in session.specialist_reviews)
+    assert all(r.validation_experiment is None for r in session.specialist_reviews)
+    assert session.challenge_round == []
+    assert session.combined_review.next_experiments == []

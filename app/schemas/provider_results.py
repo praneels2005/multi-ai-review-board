@@ -10,7 +10,7 @@ from pydantic_core import PydanticUndefined
 
 from app.schemas.review_board_schema import (
     ChallengeResponseItem, CoordinatorCombinedReview, ReviewBoardSession,
-    SpecialistAgentConfig, SpecialistFeedback,
+    SpecialistAgentConfig, SpecialistFeedback, ValidationExperiment,
 )
 
 
@@ -20,14 +20,14 @@ class ResponseFailure(ValueError):
         super().__init__(detail if detail.startswith(kind + ":") else f"{kind}: {detail}")
 
 
-def _projection(name, source, fields, required):
+def _projection(name, source, fields, required, annotations=None):
     definitions = {}
     for key in fields:
         field = deepcopy(source.model_fields[key])
         if key in required:
             field.default = PydanticUndefined
             field.default_factory = None
-        definitions[key] = (field.annotation, field)
+        definitions[key] = ((annotations or {}).get(key, field.annotation), field)
     return create_model(name, __config__=ConfigDict(strict=True), **definitions)
 
 
@@ -42,8 +42,10 @@ COORDINATOR_FIELDS = (
 RESULT_MODELS = {
     "panel_generation": create_model("PanelResult", __config__=ConfigDict(strict=True),
                                      specialists=(list[SpecialistAgentConfig], ...)),
+    # Failed persisted reviews may omit experiments; successful provider output may not.
     "specialist_review": _projection("SpecialistResult", SpecialistFeedback, SPECIALIST_FIELDS,
-                                      {"strengths", "risks", "missing_assumptions", "questions"}),
+                                      {"strengths", "risks", "missing_assumptions", "questions", "validation_experiment"},
+                                      {"validation_experiment": ValidationExperiment}),
     "challenge_generation": _projection("ChallengeResult", ChallengeResponseItem, ["challenge_point"], {"challenge_point"}),
     "challenge_response": _projection("TargetResult", ChallengeResponseItem,
                                       ["response", "reasoning_adjustment"], {"response", "reasoning_adjustment"}),
