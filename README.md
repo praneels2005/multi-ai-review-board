@@ -69,7 +69,17 @@ Mock specialist feedback uses role, expertise, mandate, startup context, and act
 
 Evidence citations reference supplied IDs such as `E1`, `E2`, or arbitrary IDs. IDs are normalized for matching; unsupplied citations are flagged in `invalid_citations`. **Matching an ID does not independently verify its underlying claim.** Evidence items are supplied reports, not proof of validation. Missing evidence produces explicit uncertainty; experiments are proposals, not completed results.
 
-The schema allows evidence sufficiency `sufficient`, `thin`, or `insufficient`. The current mock conservatively returns `thin` for supplied reports and `insufficient` when none are supplied; item counts or source labels do not earn a `sufficient` rating.
+The mock rates evidence `insufficient` when none is supplied, `thin` when documentation is incomplete, and `sufficient` **for a preliminary review only** when its bounded documentation rubric passes. This is not a rating of startup success or independent scientific/market validation.
+
+To qualify, supply at least two reports with distinct source names, distinct summaries, and different evidence types. Each summary must contain semicolon- or newline-separated `Method:`, `Sample:`, `Result:`, and `Limitations:` fields, each with at least three words. The sample must include a positive integer; the result must include a number and an observation verb (`measured`, `recorded`, `observed`, or `reported`), without recognized negation or projection language. Method/results must share at least two non-generic whole words with the idea. Anecdotes and recognized hypothetical reports do not qualify. Recognized conflicting CPU measurements block promotion.
+
+For example, a **synthetic formatting illustration, not actual evidence**, is:
+
+```text
+Method: Kubernetes tracing tested under load; Sample: 50 workload runs; Result: measured Kubernetes tracing CPU overhead 1.18%; Limitations: synthetic workloads exclude production traffic
+```
+
+Use actual observations in your own reports. Adding duplicate sources or changing IDs alone cannot improve the rating. Well-documented negative results can qualify: `sufficient` does not mean favorable. The analysis retains supplied results, unresolved assumptions, and rubric gaps. This lexical rubric cannot authenticate sources, establish their independence, understand arbitrary prose, or detect all contradictions; otherwise strong evidence may remain `thin` if it does not use the documented format.
 
 ## Walkthrough & Demo Scenarios
 

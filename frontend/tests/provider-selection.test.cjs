@@ -219,3 +219,39 @@ test('recovered review visibly labels usage provenance and estimated costs', asy
   assert.match(label(tree), /300 tokens \(reported\/estimated\)/);
   assert.match(label(tree), /Est\. cost: \$0\.00050/);
 });
+
+test('custom idea clears recovered inputs, evidence, panel and results without deleting saved reviews', async () => {
+  const session = savedSession();
+  session.idea.evidence = [{ id: 'E1', data_type: 'benchmark', source: 'Preset source', summary: 'Preset evidence' }];
+  const app = mountApp({ runEffects: true, activeRun: 'saved-run', fetcher: async url => {
+    if (url.endsWith('/presets')) return json({ devtool_ebpf: { name: 'DevPulse', idea: presetIdea } });
+    if (url.endsWith('/sessions/saved-run')) return json(session);
+    if (url.endsWith('/sessions')) return json([{ session_id: 'saved-run', title: session.idea.title }]);
+    throw Error(`Unexpected request ${url}`);
+  } });
+  app.render(); await flush();
+  let tree = app.render();
+  assert.equal(button(tree, 'Start with your own idea').props.disabled, false);
+  button(tree, 'Start with your own idea').props.onClick();
+  tree = app.render();
+  assert.match(label(tree), /Custom idea/);
+  assert.doesNotMatch(label(tree), /Status: completed|Recovered specialist|Preset evidence|Preset source/);
+  assert(elements(tree, e => ['input', 'textarea'].includes(e.type)).every(e => e.props.value === ''));
+  assert.equal(button(tree, 'Run Review Board'), undefined);
+  assert.match(label(button(tree, 'Saved Reviews')), /1/);
+  assert.equal(app.requests.filter(r => r.options?.method === 'POST' || r.options?.method === 'DELETE').length, 0);
+  button(tree, 'DevPulse').props.onClick();
+  assert(elements(app.render(), e => e.type === 'input' && e.props.value === presetIdea.title).length);
+});
+
+test('custom idea waits for initial preset load so late defaults cannot overwrite it', async () => {
+  const presets = deferred();
+  const app = mountApp({ runEffects: true, fetcher: async url => url.endsWith('/presets') ? presets.promise : json([]) });
+  let tree = app.render();
+  assert.equal(button(tree, 'Start with your own idea').props.disabled, true);
+  presets.resolve(json({ devtool_ebpf: { name: 'DevPulse', idea: presetIdea } }));
+  await flush(); tree = app.render();
+  assert.equal(button(tree, 'Start with your own idea').props.disabled, false);
+  button(tree, 'Start with your own idea').props.onClick();
+  assert(elements(app.render(), e => e.type === 'input' && e.props.value === '').length);
+});

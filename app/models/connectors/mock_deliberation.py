@@ -155,6 +155,44 @@ def respond(prompt):
     }
 
 
+def _documented_reports(idea):
+    """Conservative documentation rubric, not semantic or external verification.
+
+    Opt-in prose format: Method: ...; Sample: ...; Result: ...; Limitations: ...
+    Require two idea-specific whole words, an observed numeric result, and a
+    positive sample size. Source labels and evidence types alone never qualify.
+    """
+    stop = set("the a an and or for with from that this into using use users customer customers startup idea solution proposed platform product service our their to of in on is are can will".split())
+    words = lambda text: set(re.findall(r"[a-z]{3,}", text.lower())) - stop
+    scope = words(" ".join(idea.get(k, "") for k in ("title", "idea", "problem", "proposed_solution")))
+    qualified, reasons, sources, summaries = [], [], set(), set()
+    for item in idea.get("evidence", []):
+        summary, source = item["summary"], item["source"]
+        fields = dict((m[0].lower(), m[1].strip()) for m in re.findall(
+            r"(?:^|[;\n])\s*(Method|Sample|Result|Limitations):\s*([^;\n]+)", summary, re.I))
+        reason = None
+        if item["data_type"] == "anecdote" or _hypothetical_source(source + " " + summary):
+            reason = "anecdotal or hypothetical material"
+        elif not all(len(fields.get(k, "").split()) >= 3 for k in ("method", "sample", "result", "limitations")):
+            reason = "missing detailed Method, Sample, Result or Limitations fields"
+        elif len(scope & words(fields["method"] + " " + fields["result"])) < 2:
+            reason = "fewer than two whole-word links to the idea in method/results"
+        elif not re.search(r"\b[1-9]\d*\b", fields["sample"]) or not re.search(r"\d", fields["result"]):
+            reason = "missing positive sample size or numeric result"
+        elif not re.search(r"\b(measured|recorded|observed|reported)\b", fields["result"], re.I) or re.search(
+            r"\b(no|not|never|expected|projected|planned|would|could|will|target)\b", fields["result"], re.I):
+            reason = "result is not an explicitly reported observation"
+        elif not source.strip() or _normal(source) in sources or _normal(summary) in summaries:
+            reason = "missing source or duplicate source/report"
+        if reason:
+            reasons.append(f"[{item['id']}]: {reason}.")
+        else:
+            sources.add(_normal(source))
+            summaries.add(_normal(summary))
+            qualified.append(item)
+    return qualified, reasons
+
+
 def _evidence(idea, reviews):
     evidence = idea.get("evidence", [])
     if not evidence:
@@ -168,14 +206,27 @@ def _evidence(idea, reviews):
         if _hypothetical_source(e["source"]):
             limits.append(f"[{e['id']}] is labeled hypothetical or unmeasured; its numbers are not observed results.")
     unknowns = [f"{r['role']}: {item}" for r in reviews for item in r.get("missing_assumptions", [])]
-    # A bounded mock cannot authenticate independence, methods, or claim coverage.
-    # Retain 'thin' for supplied reports, never promote based on counts/types/labels.
+    qualified, reasons = _documented_reports(idea)
+    # Different declared evidence types provide breadth, not proof of independence.
+    conflict = any("Conflicting supplied CPU reports" in finding for finding in adverse)
+    sufficient = len(qualified) >= 2 and len({e["data_type"] for e in qualified}) >= 2 and not conflict
+    status = "sufficient" if sufficient else "thin"
     analysis = " ".join(reports + favorable + adverse + limits)
-    analysis += " Evidence remains thin: source labels and multiple items do not establish independent corroboration or coverage of the claims being evaluated."
+    if sufficient:
+        analysis += " Sufficient for a preliminary review under the bounded mock documentation rubric: "
+        analysis += ", ".join(f"[{e['id']}]" for e in qualified)
+        analysis += " supply relevant methods, sample sizes, numeric observations and limitations across distinct sources and evidence types."
+    else:
+        analysis += " Evidence remains thin: the rubric requires two distinct documented reports across two evidence types, with methods, sample sizes, observed numeric results, limitations and whole-word relevance to the idea."
+        if conflict:
+            analysis += " Recognized conflicting measurements must be reconciled first."
+    analysis += " Source labels and multiple items do not establish independent corroboration or coverage of all claims."
+    if reasons:
+        analysis += " Rubric gaps: " + " ".join(reasons)
     if unknowns:
         analysis += " Untested assumptions: " + "; ".join(unknowns)
-    analysis += " Methods, relevance, and independent corroboration require verification; this mock cannot certify sufficient evidence."
-    return {"status": "thin", "analysis": analysis}
+    analysis += " This is a deterministic documentation assessment, not independent evidence verification or proof of market demand, safety or clinical efficacy. Negative results can be well documented; sufficient does not mean favorable."
+    return {"status": status, "analysis": analysis}
 
 
 def synthesize(prompt):
