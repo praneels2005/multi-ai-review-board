@@ -177,6 +177,7 @@ const API_BASE = 'http://localhost:8000';
 export default function App() {
   // State
   const [presets, setPresets] = useState<Record<string, { name: string; description: string; idea: StartupIdeaInput }>>({});
+  const [isLoadingPresets, setIsLoadingPresets] = useState(true);
   const [selectedPresetKey, setSelectedPresetKey] = useState<string>('devtool_ebpf');
   const [panelGenProvider, setPanelGenProvider] = useState<'mock' | 'openai' | 'gemini'>('mock');
   
@@ -232,6 +233,8 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to load presets:', err);
+    } finally {
+      setIsLoadingPresets(false);
     }
   };
 
@@ -255,6 +258,15 @@ export default function App() {
     setErrorMessage(null);
     setLiveAgentStatus({});
     setCurrentPhase('idle');
+  };
+
+  const startCustomIdea = () => {
+    if (isLoadingPresets || isGeneratingPanel || isRunningReview) return;
+    applyPreset('', {
+      title: '', idea: '', target_customer: '', problem: '', proposed_solution: '', evidence: []
+    });
+    setActiveSpecialistId(null);
+    setActiveTab('board');
   };
 
   // Generate Panel
@@ -523,6 +535,13 @@ export default function App() {
             <p className="text-xs text-slate-400">Select contrasting ideas to demonstrate domain-tailored panels, evidence tests, and debate rounds</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={startCustomIdea}
+              disabled={isLoadingPresets || isGeneratingPanel || isRunningReview}
+              className="text-xs px-3.5 py-2 rounded-xl border border-indigo-500/50 text-indigo-200 bg-indigo-600/20 hover:bg-indigo-600/30 disabled:opacity-50 disabled:cursor-not-allowed transition font-semibold"
+            >
+              Start with your own idea
+            </button>
             {Object.entries(presets).map(([key, item]) => (
               <button
                 key={key}
@@ -585,7 +604,7 @@ export default function App() {
                 <FileText className="w-4 h-4 text-indigo-400" />
                 <h2 className="font-semibold text-sm text-slate-100">1. Startup Idea & Evidence Context</h2>
               </div>
-              <span className="text-[11px] text-slate-400 font-mono">ID: {selectedPresetKey}</span>
+              <span className="text-[11px] text-slate-400 font-mono">{selectedPresetKey ? `ID: ${selectedPresetKey}` : 'Custom idea'}</span>
             </div>
 
             <div className="space-y-3">
@@ -1038,7 +1057,7 @@ export default function App() {
                         <h2 className="font-bold text-base text-white">Coordinator Combined Review</h2>
                       </div>
                       <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/20">
-                        Independent Coordinator
+                        Independent Coordinator · Simulated
                       </span>
                     </div>
 
@@ -1060,9 +1079,10 @@ export default function App() {
                           Evidence Grounding: {currentSession.combined_review.evidence_sufficiency.status}
                         </span>
                       </div>
-                      <p className="text-xs opacity-90 leading-relaxed">
-                        {currentSession.combined_review.evidence_sufficiency.analysis}
-                      </p>
+                      <details className="text-xs opacity-90 leading-relaxed">
+                        <summary className="cursor-pointer">Evidence analysis</summary>
+                        <p className="mt-2">{currentSession.combined_review.evidence_sufficiency.analysis}</p>
+                      </details>
                     </div>
 
                     {/* Failure Impact Analysis Card (if an agent failed) */}
@@ -1078,57 +1098,78 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Priorities and Disagreements Grid */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                      <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2">
-                        <h4 className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
-                          <CheckCircle2 className="w-4 h-4" /> Top Strategic Priorities
-                        </h4>
-                        <ul className="space-y-1.5 text-xs text-slate-300">
-                          {currentSession.combined_review.priorities.map((p, i) => (
-                            <li key={i} className="flex items-start gap-2">
-                              <span className="text-indigo-400 font-mono font-bold">{i + 1}.</span>
-                              <span>{p}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-
-                      <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2">
-                        <h4 className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
-                          <AlertTriangle className="w-4 h-4" /> Key Disagreements & Tensions
-                        </h4>
-                        <ul className="space-y-1.5 text-xs text-slate-300">
-                          {currentSession.combined_review.disagreements.map((d, i) => (
-                            <li key={i} className="flex items-start gap-2">
-                              <span className="text-amber-400 font-mono font-bold">•</span>
-                              <span>{d}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-
                     {/* Next Ranked Experiments */}
                     <div className="space-y-2 pt-2">
                       <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
                         <Zap className="w-4 h-4 text-emerald-400" /> Recommended Validation Experiments
                       </h4>
                       <div className="space-y-2">
-                        {currentSession.combined_review.next_experiments.map((exp, i) => (
-                          <div key={i} className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-3 text-xs space-y-1.5">
-                            <div className="flex items-center gap-2">
+                        {currentSession.combined_review.next_experiments.slice(0, 3).map((exp, i) => (
+                          <details key={`${currentSession.session_id}-${i}`} className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-3 text-xs space-y-1.5">
+                            <summary className="cursor-pointer">
                               <span className="font-mono text-[10px] font-bold bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">
                                 EXP #{i + 1}
                               </span>
-                              <span className="font-semibold text-slate-200">{exp.hypothesis}</span>
-                            </div>
+                              <span className="font-semibold text-slate-200 ml-2">{exp.hypothesis}</span>
+                            </summary>
                             <p className="text-slate-400 text-[11px]"><strong className="text-slate-300">Test Design:</strong> {exp.test_design}</p>
                             <p className="text-emerald-400/90 text-[11px]"><strong className="text-emerald-300">Success Metric:</strong> {exp.success_metric}</p>
-                          </div>
+                          </details>
                         ))}
+                        {currentSession.combined_review.next_experiments.length > 3 && (
+                          <details className="text-xs text-slate-300">
+                            <summary className="cursor-pointer font-semibold text-indigo-300">More recommended experiments</summary>
+                        {currentSession.combined_review.next_experiments.slice(3).map((exp, i) => (
+                          <details key={`${currentSession.session_id}-${i + 3}`} className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-3 text-xs space-y-1.5">
+                            <summary className="cursor-pointer">
+                              <span className="font-mono text-[10px] font-bold bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                                EXP #{i + 4}
+                              </span>
+                              <span className="font-semibold text-slate-200 ml-2">{exp.hypothesis}</span>
+                            </summary>
+                            <p className="text-slate-400 text-[11px]"><strong className="text-slate-300">Test Design:</strong> {exp.test_design}</p>
+                            <p className="text-emerald-400/90 text-[11px]"><strong className="text-emerald-300">Success Metric:</strong> {exp.success_metric}</p>
+                          </details>
+                        ))}
+                          </details>
+                        )}
                       </div>
                     </div>
+
+                    <details className="text-xs text-slate-300">
+                      <summary className="cursor-pointer font-semibold text-indigo-300">Strategic priorities and detailed findings</summary>
+                      {/* Priorities and Disagreements Grid */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                        <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2">
+                          <h4 className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4" /> Top Strategic Priorities
+                          </h4>
+                          <ul className="space-y-1.5 text-xs text-slate-300">
+                            {currentSession.combined_review.priorities.map((p, i) => (
+                              <li key={i} className="flex items-start gap-2">
+                                <span className="text-indigo-400 font-mono font-bold">{i + 1}.</span>
+                                <span>{p}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2">
+                          <h4 className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                            <AlertTriangle className="w-4 h-4" /> Key Disagreements & Tensions
+                          </h4>
+                          <ul className="space-y-1.5 text-xs text-slate-300">
+                            {currentSession.combined_review.disagreements.map((d, i) => (
+                              <li key={i} className="flex items-start gap-2">
+                                <span className="text-amber-400 font-mono font-bold">•</span>
+                                <span>{d}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+
+                    </details>
 
                     {/* Decision Support Advisory Disclaimer */}
                     <div className="border-t border-slate-800/80 pt-4 flex items-center gap-2 text-[11px] text-slate-400 italic">
@@ -1217,7 +1258,7 @@ export default function App() {
                               <CheckCircle2 className="w-3.5 h-3.5" /> Strengths
                             </span>
                             <ul className="space-y-1 text-slate-300">
-                              {spec.strengths.map((s, i) => (
+                              {spec.strengths.slice(0, 1).map((s, i) => (
                                 <li key={i} className="flex items-start gap-1.5">
                                   <span className="text-emerald-500">•</span>
                                   <span>{s}</span>
@@ -1231,37 +1272,10 @@ export default function App() {
                               <AlertTriangle className="w-3.5 h-3.5" /> Critical Risks
                             </span>
                             <ul className="space-y-1 text-slate-300">
-                              {spec.risks.map((r, i) => (
+                              {spec.risks.slice(0, 1).map((r, i) => (
                                 <li key={i} className="flex items-start gap-1.5">
                                   <span className="text-amber-500">•</span>
                                   <span>{r}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        </div>
-
-                        {/* Missing Assumptions & Questions */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-800/80 space-y-1.5">
-                            <span className="font-bold text-violet-400">Missing Assumptions</span>
-                            <ul className="space-y-1 text-slate-300">
-                              {spec.missing_assumptions.map((a, i) => (
-                                <li key={i} className="flex items-start gap-1.5">
-                                  <span className="text-violet-400">•</span>
-                                  <span>{a}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-
-                          <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-800/80 space-y-1.5">
-                            <span className="font-bold text-indigo-400">Probing Questions</span>
-                            <ul className="space-y-1 text-slate-300">
-                              {spec.questions.map((q, i) => (
-                                <li key={i} className="flex items-start gap-1.5">
-                                  <span className="text-indigo-400">?</span>
-                                  <span>{q}</span>
                                 </li>
                               ))}
                             </ul>
@@ -1276,24 +1290,69 @@ export default function App() {
                               <span>Proposed Validation Experiment</span>
                             </div>
                             <p className="text-slate-300"><strong>Hypothesis:</strong> {spec.validation_experiment.hypothesis}</p>
-                            <p className="text-slate-400"><strong>Test Design:</strong> {spec.validation_experiment.test_design}</p>
-                            <p className="text-emerald-400"><strong>Success Metric:</strong> {spec.validation_experiment.success_metric}</p>
+                            <details>
+                              <summary className="cursor-pointer text-indigo-300">Experiment design and success metric</summary>
+                              <p className="text-slate-400"><strong>Test Design:</strong> {spec.validation_experiment.test_design}</p>
+                              <p className="text-emerald-400"><strong>Success Metric:</strong> {spec.validation_experiment.success_metric}</p>
+                            </details>
                           </div>
                         )}
 
-                        {/* Labeled Assumptions / Unknowns */}
-                        {spec.assumptions_and_unknowns.length > 0 && (
-                          <div className="text-[11px] text-slate-400 space-y-1 border-t border-slate-800/60 pt-2">
-                            <span className="font-semibold text-slate-300">Explicitly Labeled Assumptions & Unknowns:</span>
-                            <div className="flex flex-wrap gap-1.5">
-                              {spec.assumptions_and_unknowns.map((item, i) => (
-                                <span key={i} className="bg-slate-800/80 px-2 py-0.5 rounded text-slate-300">
-                                  {item}
-                                </span>
-                              ))}
+                        <details className="space-y-3">
+                          <summary className="cursor-pointer font-semibold text-indigo-300">Additional strengths, risks, assumptions and questions</summary>
+                          {spec.strengths.length > 1 && (
+                            <div className="space-y-1 text-slate-300">
+                              <h4 className="font-bold text-emerald-400">Additional strengths</h4>
+                              <ul className="list-disc pl-4 space-y-1">{spec.strengths.slice(1).map((text, i) => <li key={i}>{text}</li>)}</ul>
+                            </div>
+                          )}
+                          {spec.risks.length > 1 && (
+                            <div className="space-y-1 text-slate-300">
+                              <h4 className="font-bold text-amber-400">Additional risks</h4>
+                              <ul className="list-disc pl-4 space-y-1">{spec.risks.slice(1).map((text, i) => <li key={i}>{text}</li>)}</ul>
+                            </div>
+                          )}
+                          {/* Missing Assumptions & Questions */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-800/80 space-y-1.5">
+                              <span className="font-bold text-violet-400">Missing Assumptions</span>
+                              <ul className="space-y-1 text-slate-300">
+                                {spec.missing_assumptions.map((a, i) => (
+                                  <li key={i} className="flex items-start gap-1.5">
+                                    <span className="text-violet-400">•</span>
+                                    <span>{a}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+
+                            <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-800/80 space-y-1.5">
+                              <span className="font-bold text-indigo-400">Probing Questions</span>
+                              <ul className="space-y-1 text-slate-300">
+                                {spec.questions.map((q, i) => (
+                                  <li key={i} className="flex items-start gap-1.5">
+                                    <span className="text-indigo-400">?</span>
+                                    <span>{q}</span>
+                                  </li>
+                                ))}
+                              </ul>
                             </div>
                           </div>
-                        )}
+
+                          {/* Labeled Assumptions / Unknowns */}
+                          {spec.assumptions_and_unknowns.length > 0 && (
+                            <div className="text-[11px] text-slate-400 space-y-1 border-t border-slate-800/60 pt-2">
+                              <span className="font-semibold text-slate-300">Explicitly Labeled Assumptions & Unknowns:</span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {spec.assumptions_and_unknowns.map((item, i) => (
+                                  <span key={i} className="bg-slate-800/80 px-2 py-0.5 rounded text-slate-300">
+                                    {item}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </details>
                       </div>
                     )}
                   </div>
@@ -1328,7 +1387,18 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="space-y-3 text-xs">
+                    <div className="text-xs text-slate-300 space-y-2">
+                      <p className="font-semibold">{item.challenger_role} → {item.target_role}</p>
+                      <span className="text-amber-400">{item.is_simulated ? 'Simulated exchange' : 'Live exchange'}</span>
+                      <p className="text-slate-400">Challenge preview — expand for the complete exchange:</p>
+                      <p className="line-clamp-3"><strong>Challenge:</strong> {item.challenge_point}</p>
+                      <p className="line-clamp-3"><strong>Response preview:</strong> {item.response}</p>
+                      <p className="text-emerald-300">Evidence IDs referenced: {currentSession.idea.evidence
+                        .filter(evidence => [item.challenge_point, item.response, item.reasoning_adjustment].some(text => text.toUpperCase().includes(`[${evidence.id.toUpperCase()}]`)))
+                        .map(evidence => evidence.id).join(', ') || 'None'}</p>
+                    </div>
+                    <details className="space-y-3 text-xs">
+                      <summary className="cursor-pointer font-semibold text-indigo-300">Full challenge, response and reasoning adjustment</summary>
                       {/* Step 1: Challenger */}
                       <div className="bg-red-950/20 border border-red-500/30 p-3.5 rounded-xl space-y-1">
                         <div className="flex items-center justify-between text-red-300 font-bold">
@@ -1365,7 +1435,7 @@ export default function App() {
                           <span className="text-slate-300 ml-1">{item.reasoning_adjustment}</span>
                         </div>
                       </div>
-                    </div>
+                    </details>
                   </div>
                 ))
               )}
