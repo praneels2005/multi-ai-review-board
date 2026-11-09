@@ -31,6 +31,15 @@ class StartupIdeaInput(BaseModel):
         description="List of supporting evidence items with IDs (e.g. E1, E2)"
     )
 
+    @field_validator("evidence")
+    @classmethod
+    def unique_evidence_ids(cls, evidence: List[EvidenceItem]) -> List[EvidenceItem]:
+        # Use the same normalization as specialist citation validation.
+        normalized = [item.id.strip().upper() for item in evidence]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Evidence IDs must be unique (ignoring case and surrounding whitespace)")
+        return evidence
+
 
 class SpecialistAgentConfig(BaseModel):
     """Configuration for a single specialist agent on the review board."""
