@@ -1,5 +1,7 @@
+import os
 from dotenv import load_dotenv
 load_dotenv()
+os.environ.setdefault("GOOGLE_GENAI_API_VERSION", "v1beta")
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

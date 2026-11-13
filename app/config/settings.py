@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     groq_api_key: Optional[str] = None
     xai_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-3.5-flash-lite"
     serper_api_key: Optional[str] = None
     serpapi_api_key: Optional[str] = None
     chroma_path: str = "./data/chroma"

@@ -107,10 +107,10 @@ test('provider/model switches remain paired in the outgoing review request', asy
   await button(tree, 'Generate 3–5 Specialist Panel').props.onClick();
   tree = app.render();
   for (const [provider, model] of [
-    ['openai', 'gpt-4o-mini'], ['gemini', 'gemini-1.5-flash'], ['mock', 'mock-deterministic'],
+    ['openai', 'gpt-4o-mini'], ['gemini', 'gemini-3.5-flash-lite'], ['mock', 'mock-deterministic'],
   ]) {
     const providerSelect = elements(tree, e => e.type === 'select'
-      && label(e).includes('OpenAI (AsyncOpenAI)'))[0];
+      && elements(e, child => child.type === 'option' && label(child) === 'OpenAI').length > 0)[0];
     providerSelect.props.onChange({ target: { value: provider } });
     tree = app.render();
     await button(tree, 'Run Review Board').props.onClick();
@@ -193,7 +193,7 @@ test('fresh mount still initializes the default preset without starting a run', 
   assert.equal(app.requests.filter(r => r.options?.method === 'POST').length, 0);
 });
 
-test('recovered review visibly labels usage provenance and estimated costs', async () => {
+test('recovered review presents concise usage and cost metrics', async () => {
   const session = savedSession();
   session.specialist_reviews = [true, false].map((simulated, i) => ({
     specialist_id: `spec_${i}`, role: `Recovered specialist ${i}`, provider: simulated ? 'mock' : 'openai',
@@ -211,13 +211,13 @@ test('recovered review visibly labels usage provenance and estimated costs', asy
   app.render();
   await flush();
   let tree = app.render();
-  assert.match(label(tree), /100 reported \/ 200 estimated \/ 300 simulated/);
-  assert.match(label(tree), /Est\. cost: \$0\.00100/);
+  assert.match(label(tree), /600 tokens/);
+  assert.match(label(tree), /\$0\.0010/);
   button(tree, 'Specialist Feedback').props.onClick();
   tree = app.render();
-  assert.match(label(tree), /300 tokens \(simulated\)/);
-  assert.match(label(tree), /300 tokens \(reported\/estimated\)/);
-  assert.match(label(tree), /Est\. cost: \$0\.00050/);
+  assert.match(label(tree), /300 tokens/);
+  assert.match(label(tree), /AI Specialist/);
+  assert.match(label(tree), /\$0\.0005/);
 });
 
 test('custom idea clears recovered inputs, evidence, panel and results without deleting saved reviews', async () => {
@@ -254,4 +254,21 @@ test('custom idea waits for initial preset load so late defaults cannot overwrit
   assert.equal(button(tree, 'Start with your own idea').props.disabled, false);
   button(tree, 'Start with your own idea').props.onClick();
   assert(elements(app.render(), e => e.type === 'input' && e.props.value === '').length);
+});
+
+ test('only DevPulse is presented as the example idea', async () => {
+  const app = mountApp({ runEffects: true, fetcher: async url => {
+    if (url.endsWith('/presets')) return json({
+      devtool_ebpf: { name: 'DevPulse', idea: presetIdea },
+      climate: { name: 'Climate example', idea: presetIdea },
+      thin_evidence_neuro: { name: 'Neuro example', idea: presetIdea },
+    });
+    return json([]);
+  } });
+  app.render(); await flush();
+  const tree = app.render();
+  assert(button(tree, 'DevPulse'));
+  assert.equal(button(tree, 'Climate example'), undefined);
+  assert.equal(button(tree, 'Neuro example'), undefined);
+  assert.doesNotMatch(label(tree), /Deterministic Mock|Contrasting Domain|Thin Evidence Test/);
 });

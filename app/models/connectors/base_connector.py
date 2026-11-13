@@ -100,7 +100,9 @@ class BaseAIAdapter(ABC):
             "gpt-4-turbo": (10.00, 30.00),
             "gemini-1.5-flash": (0.075, 0.30),
             "gemini-2.0-flash": (0.10, 0.40),
+            "gemini-2.5-flash": (0.10, 0.40),
             "gemini-3.5-flash-lite": (0.075, 0.30),
+            "gemini-3.8-flash": (0.10, 0.40),
             "claude-3-5-sonnet": (3.00, 15.00),
             "claude-3-haiku": (0.25, 1.25),
         }
