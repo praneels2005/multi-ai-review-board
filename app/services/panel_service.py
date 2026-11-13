@@ -58,7 +58,13 @@ class PanelService:
                 user_prompt=user_prompt, model=model, timeout_seconds=15.0,
             )
             parsed = validate_result("panel_generation", response)
-            return [SpecialistAgentConfig.model_validate(s) for s in parsed["specialists"]]
+            specialists = [SpecialistAgentConfig.model_validate(s) for s in parsed["specialists"]]
+            if provider != "mock":
+                for specialist in specialists:
+                    if specialist.provider == "mock":
+                        specialist.provider = provider
+                        specialist.model = model or ("gemini-1.5-flash" if provider == "gemini" else "gpt-4o-mini")
+            return specialists
         except ResponseFailure as exc:
             if provider == "mock":
                 raise

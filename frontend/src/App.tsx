@@ -179,7 +179,7 @@ export default function App() {
   const [presets, setPresets] = useState<Record<string, { name: string; description: string; idea: StartupIdeaInput }>>({});
   const [isLoadingPresets, setIsLoadingPresets] = useState(true);
   const [selectedPresetKey, setSelectedPresetKey] = useState<string>('devtool_ebpf');
-  const [panelGenProvider, setPanelGenProvider] = useState<'mock' | 'openai' | 'gemini'>('mock');
+  const [panelGenProvider, setPanelGenProvider] = useState<'mock' | 'openai' | 'gemini'>('gemini');
   
   const [idea, setIdea] = useState<StartupIdeaInput>({
     title: '',
@@ -194,7 +194,7 @@ export default function App() {
   const [budget, setBudget] = useState<BudgetConfig>({
     call_cap: 20,
     token_cap: 50000,
-    timeout_seconds: 12.0,
+    timeout_seconds: 25.0,
     max_retries: 1
   });
 
@@ -784,14 +784,25 @@ export default function App() {
                   <Layers className="w-4 h-4 text-violet-400" />
                   <h2 className="font-semibold text-sm text-slate-100">2. Review Board Panel ({panel.length}/5)</h2>
                 </div>
-                {panel.length < 5 && (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={addCustomSpecialist}
-                    className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 bg-violet-500/10 px-2 py-1 rounded-md border border-violet-500/20 transition"
+                    onClick={() => {
+                      setPanel(prev => prev.map(s => ({ ...s, provider: 'gemini', model: 'gemini-1.5-flash' })));
+                    }}
+                    className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 px-2 py-1 rounded-md border border-cyan-500/20 transition"
+                    title="Set all specialists in panel to Gemini 1.5 Flash"
                   >
-                    <Plus className="w-3 h-3" /> Add Specialist
+                    Set all to Gemini
                   </button>
-                )}
+                  {panel.length < 5 && (
+                    <button
+                      onClick={addCustomSpecialist}
+                      className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 bg-violet-500/10 px-2 py-1 rounded-md border border-violet-500/20 transition"
+                    >
+                      <Plus className="w-3 h-3" /> Add Specialist
+                    </button>
+                  )}
+                </div>
               </div>
 
               <p className="text-xs text-slate-400">

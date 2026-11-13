@@ -644,7 +644,15 @@ class ReviewBoardOrchestrator:
         Run the independent coordinator agent.
         Explicitly tracks coordinator failures and avoids masking errors as normal success.
         """
-        adapter = get_provider_adapter("mock")
+        live_specialists = [f for f in specialist_feedbacks if f.provider != "mock"]
+        if live_specialists:
+            coord_provider = live_specialists[0].provider
+            coord_model = live_specialists[0].model
+        else:
+            coord_provider = "mock"
+            coord_model = "mock-deterministic"
+
+        adapter = get_provider_adapter(coord_provider)
 
         failed_specialists = [f for f in specialist_feedbacks if f.status in ["failed", "timed_out"]]
 
@@ -661,7 +669,8 @@ class ReviewBoardOrchestrator:
                 task="coordinator_synthesis",
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
                 user_prompt=json.dumps(coordinator_context, ensure_ascii=False),
-                timeout_seconds=self.budget.timeout_seconds
+                timeout_seconds=self.budget.timeout_seconds,
+                model=coord_model
             )
             duration_ms = (time.perf_counter() - start_t) * 1000
 

@@ -67,6 +67,7 @@ class GeminiAdapter(BaseAIAdapter):
                     model=active_model, contents=combined_prompt,
                     config=types.GenerateContentConfig(
                         temperature=temperature, max_output_tokens=max_output_tokens,
+                        response_mime_type="application/json",
                         http_options=types.HttpOptions(timeout=max(1, int(timeout_seconds * 1000)),
                                                        retry_options=types.HttpRetryOptions(attempts=1)),
                     ),
