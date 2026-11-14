@@ -57,7 +57,8 @@ class LLMClient:
             try:
                 from google import genai
                 self.model_name = self.model_name or getattr(settings, 'gemini_model', 'gemini-1.5-flash')
-                self._client = genai.Client(api_key=self.gemini_key)
+                from google.genai import types
+                self._client = genai.Client(api_key=self.gemini_key, http_options=types.HttpOptions(api_version="v1beta"))
                 self._provider = "gemini"
                 logger.info(f"LLMClient initialized with Gemini ({self.model_name})")
             except ImportError:

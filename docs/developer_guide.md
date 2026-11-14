@@ -124,3 +124,36 @@ tests/
   test_api.py          - 11 API tests (Quest Bokwe)
 docs/
   developer_guide.md   - This file
+
+### Live evidence sufficiency
+
+The coordinator receives the policy in `app/prompts/evidence_rubric.py` in its system
+prompt and a reminder in its user request. Ratings apply to an explicitly named
+founder decision, defaulting to an initial customer pilot when no decision is stated.
+
+- **Insufficient:** no relevant empirical support; pitches, planned tests, and
+  hypothetical examples do not count as observations.
+- **Thin:** relevant observations exist, but at least one sufficiency gate fails.
+- **Sufficient:** at least two distinct qualified empirical reports jointly cover
+  every decision-critical assumption, with appropriate methods and coverage,
+  explicit limitations, and no unresolved material blocker. Repeated summaries or
+  multiple metrics from one study count as one report. Evidence type labels alone
+  do not establish quality or independence.
+
+A qualified report documents its source, setting, method, sample or observation
+coverage, outcome, and limitations. Required detail depends on the inference and
+stakes; the policy deliberately avoids a universal sample-size cutoff. A missing
+specialist blocks sufficiency when its decision-critical perspective is otherwise
+uncovered. Negative results may be sufficient to justify stopping or pivoting.
+
+The existing `evidence_sufficiency` JSON object is unchanged: `status` holds the
+rating; `analysis` names the decision, cites decisive supplied evidence, and explains
+the passing gates or the blocking gap and smallest next evidence step. Sufficiency
+for a bounded pilot does not establish readiness to scale or investment merit.
+
+This is a prompt-level decision policy, not independent evidence verification or
+a deterministic enforcement mechanism. The schema validates structure and enum
+values, not the truth of a model's assessment. The retained mock provider continues
+to use its separate bounded documentation rubric. Prompt-delivery tests exercise
+all stages without paid provider calls; live calibration is still needed to measure
+how consistently each model applies the policy.
