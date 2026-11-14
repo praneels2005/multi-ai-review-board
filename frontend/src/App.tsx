@@ -179,7 +179,7 @@ export default function App() {
   const [presets, setPresets] = useState<Record<string, { name: string; description: string; idea: StartupIdeaInput }>>({});
   const [isLoadingPresets, setIsLoadingPresets] = useState(true);
   const [selectedPresetKey, setSelectedPresetKey] = useState<string>('devtool_ebpf');
-  const [panelGenProvider, setPanelGenProvider] = useState<'mock' | 'openai' | 'gemini'>('mock');
+  const [panelGenProvider, setPanelGenProvider] = useState<'mock' | 'openai' | 'gemini'>('gemini');
   
   const [idea, setIdea] = useState<StartupIdeaInput>({
     title: '',
@@ -194,7 +194,7 @@ export default function App() {
   const [budget, setBudget] = useState<BudgetConfig>({
     call_cap: 20,
     token_cap: 50000,
-    timeout_seconds: 12.0,
+    timeout_seconds: 25.0,
     max_retries: 1
   });
 
@@ -212,7 +212,7 @@ export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [savedSessions, setSavedSessions] = useState<SessionSummary[]>([]);
   const [showConfigModal, setShowConfigModal] = useState(false);
-  const [activeTab, setActiveTab] = useState<'board' | 'combined' | 'specialists' | 'debate'>('board');
+  const [activeTab, setActiveTab] = useState<'board' | 'combined' | 'specialists' | 'debate'>('combined');
 
   // Load presets on mount
   useEffect(() => {
@@ -465,8 +465,8 @@ export default function App() {
       expertise: 'Describe unique domain expertise...',
       mandate: 'Describe what questions this specialist must answer...',
       rationale: 'Why this review perspective is necessary...',
-      provider: 'mock',
-      model: 'mock-deterministic',
+      provider: 'gemini',
+      model: 'gemini-3.5-flash-lite',
       simulate_failure: null
     };
     setPanel([...panel, newSpec]);
@@ -475,27 +475,28 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#080811] text-slate-100 font-sans pb-20">
       {/* ── HEADER ── */}
-      <header className="border-b border-slate-800/80 bg-[#0d0d1a]/80 backdrop-blur sticky top-0 z-40 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
+      <header className="border-b border-slate-800/80 bg-[#0d0d1a]/90 backdrop-blur-md sticky top-0 z-40 px-6 py-4 shadow-sm">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-violet-600 to-purple-500 flex items-center justify-center shadow-lg shadow-indigo-500/25 ring-1 ring-white/10">
               <Brain className="w-6 h-6 text-white" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold tracking-tight text-white">Multiple AI Review Board</h1>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-medium">
-                  v1.1.0
+                <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">Multiple AI Review Board</h1>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-medium flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  AI-powered
                 </span>
               </div>
-              <p className="text-xs text-slate-400">Multi-agent startup evaluation with cross-provider debates & evidence grounding</p>
+              <p className="text-xs text-slate-400">Independent perspectives. Evidence-backed decisions.</p>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
             <button
               onClick={() => setShowConfigModal(true)}
-              className="flex items-center gap-2 text-xs bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/80 text-slate-300 px-3 py-2 rounded-lg transition"
+              className="flex items-center gap-2 text-xs bg-slate-900/90 hover:bg-slate-800 border border-slate-800 text-slate-300 px-3 py-2 rounded-xl transition shadow-sm"
             >
               <Sliders className="w-3.5 h-3.5 text-indigo-400" />
               <span>Budget & Caps</span>
@@ -503,7 +504,7 @@ export default function App() {
 
             <button
               onClick={() => setIsHistoryOpen(true)}
-              className="flex items-center gap-2 text-xs bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/80 text-slate-300 px-3 py-2 rounded-lg transition relative"
+              className="flex items-center gap-2 text-xs bg-slate-900/90 hover:bg-slate-800 border border-slate-800 text-slate-300 px-3 py-2 rounded-xl transition shadow-sm relative"
             >
               <History className="w-3.5 h-3.5 text-violet-400" />
               <span>Saved Reviews ({savedSessions.length})</span>
@@ -520,7 +521,7 @@ export default function App() {
               <AlertOctagon className="w-4 h-4 text-red-400 shrink-0" />
               <span>{errorMessage}</span>
             </div>
-            <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-red-200">
+            <button onClick={() => setErrorMessage(null)} aria-label="Dismiss error" className="text-red-400 hover:text-red-200">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -531,8 +532,10 @@ export default function App() {
       <div className="max-w-7xl mx-auto px-6 pt-6">
         <div className="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Walkthrough Presets:</span>
-            <p className="text-xs text-slate-400">Select contrasting ideas to demonstrate domain-tailored panels, evidence tests, and debate rounds</p>
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-400" /> Your next idea starts here
+            </span>
+            <p className="text-xs text-slate-400">Explore the example, then bring your own startup idea to the board.</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button
@@ -542,11 +545,13 @@ export default function App() {
             >
               Start with your own idea
             </button>
-            {Object.entries(presets).map(([key, item]) => (
+            {Object.entries(presets).filter(([key]) => key === 'devtool_ebpf').map(([key, item]) => (
               <button
                 key={key}
                 onClick={() => applyPreset(key, item.idea)}
-                className={`text-xs px-3.5 py-2 rounded-xl border transition font-medium text-left ${
+                disabled={isLoadingPresets || isGeneratingPanel || isRunningReview}
+                aria-pressed={selectedPresetKey === key}
+                className={`text-xs px-3.5 py-2 rounded-xl border transition font-medium text-left disabled:opacity-50 disabled:cursor-not-allowed ${
                   selectedPresetKey === key
                     ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-200 shadow-sm'
                     : 'bg-slate-800/40 border-slate-700/60 text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
@@ -554,7 +559,7 @@ export default function App() {
               >
                 <div className="font-semibold">{item.name.split(':')[1]?.trim() || item.name}</div>
                 <div className="text-[10px] text-slate-400 font-normal">
-                  {key === 'thin_evidence_neuro' ? '⚠️ Thin Evidence Test' : 'Contrasting Domain'}
+                  Explore example idea
                 </div>
               </button>
             ))}
@@ -599,12 +604,12 @@ export default function App() {
         <section className="lg:col-span-5 space-y-6">
           {/* Card: Startup Idea Input */}
           <div className="bg-[#0f0f1d] border border-slate-800/90 rounded-2xl p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
               <div className="flex items-center gap-2">
                 <FileText className="w-4 h-4 text-indigo-400" />
-                <h2 className="font-semibold text-sm text-slate-100">1. Startup Idea & Evidence Context</h2>
+                <h2 className="font-semibold text-sm text-slate-100">1. Describe your startup</h2>
               </div>
-              <span className="text-[11px] text-slate-400 font-mono">{selectedPresetKey ? `ID: ${selectedPresetKey}` : 'Custom idea'}</span>
+              <span className="text-[11px] text-slate-400 font-mono">{selectedPresetKey ? 'Example idea' : 'Custom idea'}</span>
             </div>
 
             <div className="space-y-3">
@@ -668,8 +673,8 @@ export default function App() {
             <div className="border-t border-slate-800/80 pt-4 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-xs font-semibold text-slate-300">Supplied Evidence Items</h3>
-                  <p className="text-[11px] text-slate-400">Specialists and coordinator verify these specific IDs (E1, E2)</p>
+                  <h3 className="text-xs font-semibold text-slate-300">Supporting evidence</h3>
+                  <p className="text-[11px] text-slate-400">Add research, interviews, or metrics for the board to assess.</p>
                 </div>
                 <button
                   type="button"
@@ -683,7 +688,7 @@ export default function App() {
               {idea.evidence.length === 0 ? (
                 <div className="bg-amber-950/20 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300/80 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>No empirical evidence supplied. Review board will evaluate as unbacked claims (insufficient evidence).</span>
+                  <span>No evidence added yet. You can still explore your idea; the board will flag assumptions to validate.</span>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -745,21 +750,20 @@ export default function App() {
 
             {/* Panel Generation Provider Options */}
             <div className="border-t border-slate-800/80 pt-3 flex items-center justify-between">
-              <span className="text-[11px] text-slate-400">Generator Model:</span>
+              <span className="text-[11px] text-slate-400 font-medium">Panel provider</span>
               <select
                 value={panelGenProvider}
                 onChange={(e) => setPanelGenProvider(e.target.value as any)}
-                className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-xs text-slate-300"
+                className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition"
               >
-                <option value="mock">Deterministic Mock</option>
+                <option value="gemini">Google Gemini (3.5-flash-lite)</option>
                 <option value="openai">OpenAI (gpt-4o-mini)</option>
-                <option value="gemini">Google Gemini (1.5-flash)</option>
               </select>
             </div>
 
             <button
               onClick={handleGeneratePanel}
-              disabled={isGeneratingPanel}
+              disabled={isGeneratingPanel || isRunningReview || !idea.title.trim() || !idea.idea.trim()}
               className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-medium text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50 transition"
             >
               {isGeneratingPanel ? (
@@ -779,19 +783,39 @@ export default function App() {
           {/* Panel Inspector & Customizer */}
           {panel.length > 0 && (
             <div className="bg-[#0f0f1d] border border-slate-800/90 rounded-2xl p-6 shadow-xl space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
                 <div className="flex items-center gap-2">
                   <Layers className="w-4 h-4 text-violet-400" />
                   <h2 className="font-semibold text-sm text-slate-100">2. Review Board Panel ({panel.length}/5)</h2>
                 </div>
-                {panel.length < 5 && (
+                <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={addCustomSpecialist}
-                    className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 bg-violet-500/10 px-2 py-1 rounded-md border border-violet-500/20 transition"
+                    onClick={() => {
+                      setPanel(prev => prev.map(s => ({ ...s, provider: 'gemini', model: 'gemini-3.5-flash-lite' })));
+                    }}
+                    className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 px-2.5 py-1 rounded-lg border border-cyan-500/20 transition font-medium"
+                    title="Set all specialists in panel to Gemini 3.5 Flash-Lite"
                   >
-                    <Plus className="w-3 h-3" /> Add Specialist
+                    ⚡ All Gemini
                   </button>
-                )}
+                  <button
+                    onClick={() => {
+                      setPanel(prev => prev.map(s => ({ ...s, provider: 'openai', model: 'gpt-4o-mini' })));
+                    }}
+                    className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 bg-violet-500/10 hover:bg-violet-500/20 px-2.5 py-1 rounded-lg border border-violet-500/20 transition font-medium"
+                    title="Set all specialists in panel to OpenAI gpt-4o-mini"
+                  >
+                    ⚡ All OpenAI
+                  </button>
+                  {panel.length < 5 && (
+                    <button
+                      onClick={addCustomSpecialist}
+                      className="flex items-center gap-1 text-[11px] text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-750 px-2.5 py-1 rounded-lg border border-slate-750 transition font-medium"
+                    >
+                      <Plus className="w-3 h-3" /> Add
+                    </button>
+                  )}
+                </div>
               </div>
 
               <p className="text-xs text-slate-400">
@@ -829,7 +853,7 @@ export default function App() {
                           )}
                         </div>
                         {panel.length > 3 && (
-                          <button onClick={() => removeSpecialist(idx)} className="text-slate-400 hover:text-red-400">
+                          <button onClick={() => removeSpecialist(idx)} aria-label={`Remove ${spec.role}`} className="text-slate-400 hover:text-red-400">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         )}
@@ -856,55 +880,43 @@ export default function App() {
                       {/* Provider & Model Selector */}
                       <div className="grid grid-cols-2 gap-2 pt-1">
                         <div>
-                          <label className="text-[10px] text-slate-400">AI Provider</label>
+                          <label className="text-[10px] text-slate-400 font-medium">AI Provider</label>
                           <select
                             value={spec.provider}
                             onChange={(e) => {
                               const p = e.target.value as SpecialistAgentConfig['provider'];
-                              let defaultModel = 'mock-deterministic';
+                              let defaultModel = 'gemini-3.5-flash-lite';
                               if (p === 'openai') defaultModel = 'gpt-4o-mini';
-                              if (p === 'gemini') defaultModel = 'gemini-1.5-flash';
+                              if (p === 'gemini') defaultModel = 'gemini-3.5-flash-lite';
+                              if (p === 'mock') defaultModel = 'mock-deterministic';
                               setPanel(previous => previous.map((specialist, index) =>
                                 index === idx
                                   ? { ...specialist, provider: p, model: defaultModel }
                                   : specialist
                               ));
                             }}
-                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5 focus:border-indigo-500"
                           >
-                            <option value="mock">Deterministic Mock</option>
-                            <option value="openai">OpenAI (AsyncOpenAI)</option>
-                            <option value="gemini">Google Gemini (GenAI SDK)</option>
+                            <option value="gemini">Google Gemini</option>
+                            <option value="openai">OpenAI</option>
+                            {spec.provider === 'mock' && (
+                              <option value="mock" hidden disabled>Archived provider</option>
+                            )}
                           </select>
                         </div>
 
                         <div>
-                          <label className="text-[10px] text-slate-400">Model</label>
+                          <label className="text-[10px] text-slate-400 font-medium">Model</label>
                           <input
                             type="text"
                             value={spec.model}
                             onChange={(e) => updateSpecialist(idx, 'model', e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5"
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 mt-0.5 font-mono focus:border-indigo-500"
                           />
                         </div>
                       </div>
 
-                      {/* Failure Simulation Dropdown */}
-                      <div className="bg-slate-950/60 p-2 rounded border border-slate-800/60 mt-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] text-slate-400">Simulate Failure (Demo Resilience):</span>
-                          <select
-                            value={spec.simulate_failure || ''}
-                            onChange={(e) => updateSpecialist(idx, 'simulate_failure', e.target.value || null)}
-                            className="bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-[10px] text-amber-300"
-                          >
-                            <option value="">None (Normal)</option>
-                            <option value="timeout">Simulate Timeout</option>
-                            <option value="provider_error">Simulate Connection Error</option>
-                            <option value="malformed_output">Simulate Malformed JSON</option>
-                          </select>
-                        </div>
-                      </div>
+
                     </div>
                   );
                 })}
@@ -997,18 +1009,15 @@ export default function App() {
                   <Clock className="w-3.5 h-3.5 text-indigo-400" />
                   <span>{currentSession.execution_summary.total_latency_ms.toFixed(0)} ms</span>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5">
                   <Cpu className="w-3.5 h-3.5 text-violet-400" />
-                  <span>
+                  <span className="text-slate-300 font-semibold">
                     {currentSession.execution_summary.total_tokens.toLocaleString()} tokens
-                    {currentSession.execution_summary.reported_tokens !== undefined ? (
-                      <> ({currentSession.execution_summary.reported_tokens.toLocaleString()} reported / {currentSession.execution_summary.estimated_tokens?.toLocaleString() ?? '0'} estimated / {currentSession.execution_summary.simulated_tokens?.toLocaleString() ?? '0'} simulated)</>
-                    ) : ' (usage source unavailable)'}
                   </span>
                 </div>
                 <div className="flex items-center gap-1">
                   <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Est. cost: ${currentSession.execution_summary.total_cost_usd.toFixed(5)}</span>
+                  <span className="text-emerald-400 font-semibold">${currentSession.execution_summary.total_cost_usd.toFixed(4)}</span>
                 </div>
               </div>
 
@@ -1028,9 +1037,9 @@ export default function App() {
               {!currentSession?.combined_review ? (
                 <div className="bg-[#0f0f1d] border border-slate-800 rounded-2xl p-10 text-center space-y-3">
                   <Brain className="w-10 h-10 text-slate-400 mx-auto" />
-                  <h3 className="text-base font-semibold text-slate-300">No Review Run Yet</h3>
+                  <h3 className="text-base font-semibold text-slate-300">A fresh perspective on your startup</h3>
                   <p className="text-xs text-slate-400 max-w-sm mx-auto">
-                    Generate the specialist panel on the left, adjust parameters, and click &quot;Run Review Board&quot; to synthesize multi-agent findings.
+                    Describe your idea, build your specialist panel, and run a review. Your board will surface strengths, challenge assumptions, and suggest what to test next.
                   </p>
                 </div>
               ) : (
@@ -1056,12 +1065,13 @@ export default function App() {
                         <Sparkles className="w-5 h-5 text-indigo-400" />
                         <h2 className="font-bold text-base text-white">Coordinator Combined Review</h2>
                       </div>
-                      <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/20">
-                        Independent Coordinator · Simulated
+                      <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-300 px-2.5 py-1 rounded-full border border-indigo-500/30 flex items-center gap-1.5 font-medium">
+                        <Sparkles className="w-3 h-3 text-indigo-400" />
+                        {currentSession.combined_review.is_fallback ? 'Fallback Guidance' : 'Live Autonomous Synthesis'}
                       </span>
                     </div>
 
-                    <p className="text-xs text-slate-300 leading-relaxed bg-slate-900/60 p-4 rounded-xl border border-slate-800">
+                    <p className="text-xs text-slate-200 leading-relaxed bg-slate-900/80 p-4 rounded-xl border border-slate-800">
                       {currentSession.combined_review.summary}
                     </p>
 
@@ -1080,8 +1090,8 @@ export default function App() {
                         </span>
                       </div>
                       <details className="text-xs opacity-90 leading-relaxed">
-                        <summary className="cursor-pointer">Evidence analysis</summary>
-                        <p className="mt-2">{currentSession.combined_review.evidence_sufficiency.analysis}</p>
+                        <summary className="cursor-pointer font-medium text-slate-300 hover:text-white">Click to view evidence analysis</summary>
+                        <p className="mt-2 text-slate-200">{currentSession.combined_review.evidence_sufficiency.analysis}</p>
                       </details>
                     </div>
 
@@ -1098,78 +1108,65 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Priorities and Disagreements Grid (Prominently Shown) */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                      <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2.5">
+                        <h4 className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-indigo-400" /> Top Strategic Priorities
+                        </h4>
+                        <ul className="space-y-2 text-xs text-slate-300">
+                          {currentSession.combined_review.priorities.map((p, i) => (
+                            <li key={i} className="flex items-start gap-2 bg-slate-950/40 p-2 rounded-lg border border-slate-800/50">
+                              <span className="text-indigo-400 font-mono font-bold shrink-0">{i + 1}.</span>
+                              <span className="leading-relaxed">{p}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2.5">
+                        <h4 className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                          <AlertTriangle className="w-4 h-4 text-amber-400" /> Strategic Disagreements & Tensions
+                        </h4>
+                        <ul className="space-y-2 text-xs text-slate-300">
+                          {currentSession.combined_review.disagreements.map((d, i) => (
+                            <li key={i} className="flex items-start gap-2 bg-slate-950/40 p-2 rounded-lg border border-slate-800/50">
+                              <span className="text-amber-400 font-mono font-bold shrink-0">•</span>
+                              <span className="leading-relaxed">{d}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+
                     {/* Next Ranked Experiments */}
                     <div className="space-y-2 pt-2">
                       <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
                         <Zap className="w-4 h-4 text-emerald-400" /> Recommended Validation Experiments
                       </h4>
                       <div className="space-y-2">
-                        {currentSession.combined_review.next_experiments.slice(0, 3).map((exp, i) => (
-                          <details key={`${currentSession.session_id}-${i}`} className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-3 text-xs space-y-1.5">
-                            <summary className="cursor-pointer">
+                        {currentSession.combined_review.next_experiments.map((exp, i) => (
+                          <div key={`${currentSession.session_id}-${i}`} className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-3.5 text-xs space-y-2">
+                            <div className="flex items-center gap-2">
                               <span className="font-mono text-[10px] font-bold bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">
                                 EXP #{i + 1}
                               </span>
-                              <span className="font-semibold text-slate-200 ml-2">{exp.hypothesis}</span>
-                            </summary>
-                            <p className="text-slate-400 text-[11px]"><strong className="text-slate-300">Test Design:</strong> {exp.test_design}</p>
-                            <p className="text-emerald-400/90 text-[11px]"><strong className="text-emerald-300">Success Metric:</strong> {exp.success_metric}</p>
-                          </details>
+                              <span className="font-semibold text-slate-200">{exp.hypothesis}</span>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] pt-1">
+                              <div className="bg-slate-950/40 p-2 rounded-lg border border-slate-800/40">
+                                <strong className="text-slate-400 block mb-0.5">Test Design:</strong>
+                                <span className="text-slate-300 leading-relaxed">{exp.test_design}</span>
+                              </div>
+                              <div className="bg-slate-950/40 p-2 rounded-lg border border-slate-800/40">
+                                <strong className="text-emerald-400/90 block mb-0.5">Success Metric:</strong>
+                                <span className="text-emerald-300/90 leading-relaxed">{exp.success_metric}</span>
+                              </div>
+                            </div>
+                          </div>
                         ))}
-                        {currentSession.combined_review.next_experiments.length > 3 && (
-                          <details className="text-xs text-slate-300">
-                            <summary className="cursor-pointer font-semibold text-indigo-300">More recommended experiments</summary>
-                        {currentSession.combined_review.next_experiments.slice(3).map((exp, i) => (
-                          <details key={`${currentSession.session_id}-${i + 3}`} className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-3 text-xs space-y-1.5">
-                            <summary className="cursor-pointer">
-                              <span className="font-mono text-[10px] font-bold bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">
-                                EXP #{i + 4}
-                              </span>
-                              <span className="font-semibold text-slate-200 ml-2">{exp.hypothesis}</span>
-                            </summary>
-                            <p className="text-slate-400 text-[11px]"><strong className="text-slate-300">Test Design:</strong> {exp.test_design}</p>
-                            <p className="text-emerald-400/90 text-[11px]"><strong className="text-emerald-300">Success Metric:</strong> {exp.success_metric}</p>
-                          </details>
-                        ))}
-                          </details>
-                        )}
                       </div>
                     </div>
-
-                    <details className="text-xs text-slate-300">
-                      <summary className="cursor-pointer font-semibold text-indigo-300">Strategic priorities and detailed findings</summary>
-                      {/* Priorities and Disagreements Grid */}
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                        <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2">
-                          <h4 className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
-                            <CheckCircle2 className="w-4 h-4" /> Top Strategic Priorities
-                          </h4>
-                          <ul className="space-y-1.5 text-xs text-slate-300">
-                            {currentSession.combined_review.priorities.map((p, i) => (
-                              <li key={i} className="flex items-start gap-2">
-                                <span className="text-indigo-400 font-mono font-bold">{i + 1}.</span>
-                                <span>{p}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-
-                        <div className="bg-slate-900/80 border border-slate-800/90 rounded-xl p-4 space-y-2">
-                          <h4 className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
-                            <AlertTriangle className="w-4 h-4" /> Key Disagreements & Tensions
-                          </h4>
-                          <ul className="space-y-1.5 text-xs text-slate-300">
-                            {currentSession.combined_review.disagreements.map((d, i) => (
-                              <li key={i} className="flex items-start gap-2">
-                                <span className="text-amber-400 font-mono font-bold">•</span>
-                                <span>{d}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-
-                    </details>
 
                     {/* Decision Support Advisory Disclaimer */}
                     <div className="border-t border-slate-800/80 pt-4 flex items-center gap-2 text-[11px] text-slate-400 italic">
@@ -1202,21 +1199,19 @@ export default function App() {
                           <h3 className="font-bold text-sm text-slate-100">{spec.role}</h3>
                         </div>
                         <div className="flex items-center gap-2 mt-1">
-                          <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-mono">
+                          <span className="text-[10px] bg-slate-800/80 text-slate-300 px-2 py-0.5 rounded font-mono border border-slate-750">
                             {spec.provider} / {spec.model}
                           </span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
-                            spec.is_simulated ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          }`}>
-                            {spec.is_simulated ? 'Simulated' : 'Live API Call'}
+                          <span className="text-[10px] px-2 py-0.5 rounded font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 flex items-center gap-1">
+                            <Sparkles className="w-2.5 h-2.5" /> AI Specialist
                           </span>
                         </div>
                       </div>
 
                       <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
                         <span>{spec.latency_ms.toFixed(0)} ms</span>
-                        <span>{spec.token_usage?.total_tokens || 0} tokens ({spec.is_simulated ? 'simulated' : 'reported/estimated'})</span>
-                        <span>Est. cost: ${(spec.cost_estimate_usd || 0).toFixed(5)}</span>
+                        <span>{(spec.token_usage?.total_tokens || 0).toLocaleString()} tokens</span>
+                        <span className="text-emerald-400 font-semibold">${(spec.cost_estimate_usd || 0).toFixed(4)}</span>
                       </div>
                     </div>
 
@@ -1381,32 +1376,37 @@ export default function App() {
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-mono">
-                          Challenger ({item.challenger_provider || 'mock'}) → Target ({item.target_provider || 'mock'})
+                        <span className="text-[10px] bg-slate-800/80 text-slate-300 px-2.5 py-0.5 rounded font-mono border border-slate-750">
+                          {item.challenger_provider || 'gemini'} vs {item.target_provider || 'gemini'}
                         </span>
                       </div>
                     </div>
 
-                    <div className="text-xs text-slate-300 space-y-2">
-                      <p className="font-semibold">{item.challenger_role} → {item.target_role}</p>
-                      <span className="text-amber-400">{item.is_simulated ? 'Simulated exchange' : 'Live exchange'}</span>
-                      <p className="text-slate-400">Challenge preview — expand for the complete exchange:</p>
-                      <p className="line-clamp-3"><strong>Challenge:</strong> {item.challenge_point}</p>
-                      <p className="line-clamp-3"><strong>Response preview:</strong> {item.response}</p>
-                      <p className="text-emerald-300">Evidence IDs referenced: {currentSession.idea.evidence
+                    <div className="text-xs text-slate-300 space-y-2.5">
+                      <p className="font-semibold text-sm text-slate-100 flex items-center gap-2">
+                        <span className="text-rose-400 font-bold">{item.challenger_role}</span>
+                        <span className="text-slate-500 font-normal">critiques</span>
+                        <span className="text-indigo-400 font-bold">{item.target_role}</span>
+                      </p>
+                      <p className="text-slate-400 text-[11px]">2-Step Autonomous Cross-Agent Evaluation:</p>
+                      <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800/60 space-y-2">
+                        <p className="line-clamp-2 text-slate-300"><strong className="text-rose-400">Core Critique:</strong> &ldquo;{item.challenge_point}&rdquo;</p>
+                        <p className="line-clamp-2 text-slate-300"><strong className="text-indigo-400">Specialist Defense:</strong> &ldquo;{item.response}&rdquo;</p>
+                      </div>
+                      <p className="text-emerald-400 text-[11px] font-mono">Evidence IDs Cited: {currentSession.idea.evidence
                         .filter(evidence => [item.challenge_point, item.response, item.reasoning_adjustment].some(text => text.toUpperCase().includes(`[${evidence.id.toUpperCase()}]`)))
                         .map(evidence => evidence.id).join(', ') || 'None'}</p>
                     </div>
-                    <details className="space-y-3 text-xs">
-                      <summary className="cursor-pointer font-semibold text-indigo-300">Full challenge, response and reasoning adjustment</summary>
+                    <details className="space-y-3 text-xs pt-1">
+                      <summary className="cursor-pointer font-semibold text-indigo-300 hover:text-indigo-200">View complete debate dialog & reasoning shift</summary>
                       {/* Step 1: Challenger */}
-                      <div className="bg-red-950/20 border border-red-500/30 p-3.5 rounded-xl space-y-1">
-                        <div className="flex items-center justify-between text-red-300 font-bold">
+                      <div className="bg-rose-950/20 border border-rose-500/30 p-3.5 rounded-xl space-y-1">
+                        <div className="flex items-center justify-between text-rose-300 font-bold">
                           <div className="flex items-center gap-1.5">
-                            <AlertTriangle className="w-4 h-4" />
-                            <span>Step 1: {item.challenger_role} challenges {item.target_role}:</span>
+                            <AlertTriangle className="w-4 h-4 text-rose-400" />
+                            <span>Step 1: {item.challenger_role} critique:</span>
                           </div>
-                          <span className="text-[10px] font-mono text-red-400">{item.challenger_provider || 'mock'}</span>
+                          <span className="text-[10px] font-mono text-rose-400">{item.challenger_provider || 'gemini'}</span>
                         </div>
                         <p className="text-slate-200 leading-relaxed pl-5">
                           &ldquo;{item.challenge_point}&rdquo;
@@ -1417,10 +1417,10 @@ export default function App() {
                       <div className="bg-indigo-950/20 border border-indigo-500/30 p-3.5 rounded-xl space-y-1">
                         <div className="flex items-center justify-between text-indigo-300 font-bold">
                           <div className="flex items-center gap-1.5">
-                            <ArrowRight className="w-4 h-4" />
-                            <span>Step 2: {item.target_role}&apos;s Independent Defense:</span>
+                            <ArrowRight className="w-4 h-4 text-indigo-400" />
+                            <span>Step 2: {item.target_role}&apos;s Defense:</span>
                           </div>
-                          <span className="text-[10px] font-mono text-indigo-400">{item.target_provider || 'mock'}</span>
+                          <span className="text-[10px] font-mono text-indigo-400">{item.target_provider || 'gemini'}</span>
                         </div>
                         <p className="text-slate-200 leading-relaxed pl-5">
                           &ldquo;{item.response}&rdquo;
@@ -1454,7 +1454,7 @@ export default function App() {
                   <History className="w-5 h-5 text-violet-400" />
                   <h3 className="font-bold text-base text-white">Saved Review Sessions</h3>
                 </div>
-                <button onClick={() => setIsHistoryOpen(false)} className="text-slate-400 hover:text-white">
+                <button onClick={() => setIsHistoryOpen(false)} aria-label="Close dialog" className="text-slate-400 hover:text-white">
                   <X className="w-5 h-5" />
                 </button>
               </div>

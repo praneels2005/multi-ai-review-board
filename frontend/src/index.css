@@ -211,3 +211,27 @@ kbd {
 .feature-glow:hover {
   box-shadow: 0 0 30px rgba(99, 102, 241, 0.12), 0 8px 32px rgba(0, 0, 0, 0.3);
 }
+
+/* Accessible interaction and comfortable reading across screen sizes. */
+button, input, select, textarea, summary { -webkit-tap-highlight-color: transparent; }
+button:not(:disabled), summary { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid #a5b4fc;
+  outline-offset: 3px;
+}
+button:disabled { cursor: not-allowed; }
+input, textarea, select { min-width: 0; }
+textarea { line-height: 1.6; }
+@media (max-width: 640px) {
+  header { padding-inline: 1rem; }
+  main { padding-inline: 1rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

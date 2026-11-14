@@ -37,7 +37,7 @@ async def generate_panel(request: GeneratePanelRequest):
         specialists = await PanelService.generate_panel(
             idea_input=request.idea,
             provider=request.provider,
-            model=request.model or ("gpt-4o-mini" if request.provider == "openai" else ("gemini-1.5-flash" if request.provider == "gemini" else "mock-deterministic"))
+            model=request.model or ("gpt-4o-mini" if request.provider == "openai" else ("gemini-3.5-flash-lite" if request.provider == "gemini" else "mock-deterministic"))
         )
         return specialists
     except Exception as e:

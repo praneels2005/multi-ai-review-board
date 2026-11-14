@@ -12,6 +12,7 @@ from app.schemas.review_board_schema import (
     SpecialistAgentConfig,
 )
 from app.models.connectors.factory import get_provider_adapter
+from app.models.connectors.execution_usage import ProviderCallError
 from app.schemas.provider_results import validate_result, ResponseFailure
 
 
@@ -58,13 +59,19 @@ class PanelService:
                 user_prompt=user_prompt, model=model, timeout_seconds=15.0,
             )
             parsed = validate_result("panel_generation", response)
-            return [SpecialistAgentConfig.model_validate(s) for s in parsed["specialists"]]
-        except ResponseFailure as exc:
+            specialists = [SpecialistAgentConfig.model_validate(s) for s in parsed["specialists"]]
+            if provider != "mock":
+                for specialist in specialists:
+                    if specialist.provider == "mock":
+                        specialist.provider = provider
+                        specialist.model = model or ("gemini-3.5-flash-lite" if provider == "gemini" else "gpt-4o-mini")
+            return specialists
+        except (ResponseFailure, ProviderCallError) as exc:
             if provider == "mock":
                 raise
             # Keep the existing deterministic fallback, visibly attributed in the
             # existing list contract. Never repair malformed live specialist entries.
-            reason = exc.kind
+            reason = getattr(exc, "kind", "upstream_error")
             mock_adapter = get_provider_adapter("mock")
             fallback = await mock_adapter.call(
                 task="panel_generation", system_prompt=PANEL_GENERATION_SYSTEM_PROMPT,
